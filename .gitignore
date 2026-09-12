@@ -1,0 +1,9 @@
+# 系统/编辑器杂物
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# 测试/依赖（ST 只按 manifest 加载 index.js / style.css，test.js 留在仓库里也无妨）
+node_modules/
