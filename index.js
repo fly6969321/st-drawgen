@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.16";
+    const VERSION = "1.6.17";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -807,20 +807,16 @@
             window.__sdgMesBtnObs.observe(chatEl, { childList: true, subtree: true });
             if (!window.__sdgMesBtnClick) {
                 window.__sdgMesBtnClick = true;
-                /* 绑 window 捕获：比 document 更早触发，主题/美化插件在 document 上
-                   先注册的监听（stopImmediatePropagation）吞不掉点图/点灯箱/插件按钮。
-                   只精确匹配插件自己的元素，不做任何全页面坐标兜底——
-                   全局拦截会在美化主题上误吞其它界面的点击（v1.6.13 的教训） */
-                let lastTouchAct = 0;   /* touch 层刚处理过的时刻：紧随其后的合成 click 一律忽略，
-                                           防止触摸刚开灯箱、合成 click 落在灯箱上又把它关上 */
+                /* 绑 window 捕获：只管插件自己的按钮 / 折叠条 / 翻页 / 灯箱关闭。
+                   点图开预览不在这里——改为创建图片时就地绑定（智慧姬式，用户手机实测可用），
+                   全局层不再拦任何图片点击 */
                 window.addEventListener("click", function (ev) {
-                    if (Date.now() - lastTouchAct < 600) return;
                     const tg = ev.target;
                     if (!tg || !tg.closest) return;
                     /* 点灯箱任意处关闭 */
                     const lb = tg.closest("#sdg-lightbox");
                     if (lb) { ev.preventDefault(); ev.stopPropagation(); lb.style.display = "none"; return; }
-                    /* 楼里的图：生成图片 / 折叠条 / ↻ 重画 / 点图开灯箱 */
+                    /* 楼里：生成图片 / 折叠条 / ↻ 重画 / 翻页（点图在图片自己身上，见 fillSlot/孤儿图） */
                     const slot = tg.closest(".sdg-slot");
                     if (slot) {
                         const m0 = slot.closest(".mes"); const idx0 = m0 ? Number(m0.getAttribute("mesid")) : NaN;
@@ -855,12 +851,8 @@
                             renderFloorImage(idx0);
                             return;
                         }
-                        const im = tg.closest("img.sdg-img");
-                        if (im) { ev.preventDefault(); ev.stopPropagation(); openLightbox(im.src); return; }
                         return;
                     }
-                    const orphan = tg.closest("img.sdg-img");
-                    if (orphan) { ev.preventDefault(); ev.stopPropagation(); openLightbox(orphan.src); return; }
                     const b1 = tg.closest("." + MES_BTN_REINJECT);
                     if (b1) {
                         ev.preventDefault(); ev.stopPropagation();
@@ -873,38 +865,6 @@
                         ev.preventDefault(); ev.stopPropagation();
                         const m = b2.closest(".mes"); const idx = m ? Number(m.getAttribute("mesid")) : NaN;
                         if (Number.isFinite(idx)) onRegenFloor(idx);
-                    }
-                }, true);
-                /* 手机兜底：只认插件自己的图（closest 精确匹配），touchend 直接开/关灯箱。
-                   按下到抬起位移超 10px 视为滚动，不触发 */
-                let tsX = 0, tsY = 0, tsT = 0;
-                window.addEventListener("touchstart", function (ev) {
-                    const t0 = ev.target;
-                    tsX = -9999; tsY = -9999; tsT = 0;
-                    if (t0 && t0.closest && (t0.closest("img.sdg-img") || t0.closest("#sdg-lightbox"))) {
-                        const c0 = ev.changedTouches && ev.changedTouches[0];
-                        if (c0) { tsX = c0.clientX; tsY = c0.clientY; tsT = Date.now(); }
-                    }
-                }, true);
-                window.addEventListener("touchend", function (ev) {
-                    if (Date.now() - tsT > 1500) return;
-                    const c0 = ev.changedTouches && ev.changedTouches[0];
-                    if (!c0) return;
-                    if (Math.abs(c0.clientX - tsX) > 10 || Math.abs(c0.clientY - tsY) > 10) return;
-                    const tg = ev.target;
-                    if (!tg || !tg.closest) return;
-                    const lb = tg.closest("#sdg-lightbox");
-                    if (lb) {
-                        ev.preventDefault(); ev.stopPropagation();
-                        lastTouchAct = Date.now();
-                        lb.style.display = "none";
-                        return;
-                    }
-                    const im = tg.closest("img.sdg-img");
-                    if (im) {
-                        ev.preventDefault(); ev.stopPropagation();
-                        lastTouchAct = Date.now();
-                        openLightbox(im.src);
                     }
                 }, true);
             }
@@ -1498,6 +1458,13 @@
             im.style.height = "auto";
             im.style.maxHeight = maxImgH();
             im.style.objectFit = "contain";
+            /* 点图看原图：就地绑定（智慧姬式）——监听在图片自己身上，
+               不经全局层，和主题的触摸处理天然错开；重渲染即重建重绑 */
+            im.addEventListener("click", function (ev) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                openLightbox(im.src);
+            });
             im.setAttribute("src", src);
         }
     }
@@ -1580,6 +1547,12 @@
                 img.style.height = "auto";
                 img.style.maxHeight = maxImgH();
                 img.style.objectFit = "contain";
+                /* 点图看原图：就地绑定，同 fillSlot */
+                img.addEventListener("click", function (ev) {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    openLightbox(img.src);
+                });
                 el.appendChild(img);
             }
             if (img.getAttribute("src") !== src) img.setAttribute("src", src);
