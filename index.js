@@ -1302,30 +1302,32 @@
         box.style.overflow = "auto";   /* 兜底：万一图仍超高，灯箱内可滚动看全，不跑出屏幕 */
         box.style.cursor = "zoom-out";
         im.style.display = "block";
-        /* 用可视视口实测像素约束图片尺寸，绕开手机 vh/dvh 受地址栏、页面缩放影响导致
-           图片按原始分辨率跑出屏幕的问题；important 压过主题全局 img 规则 */
+        im.style.width = "auto";
+        im.style.height = "auto";
+        im.style.objectFit = "contain";
+        im.style.borderRadius = "6px";
+        /* 先把图和灯箱无条件显示出来，保证点击一定有反应 */
+        im.src = src;
+        box.style.display = "flex";
+        /* 再按可视视口实测像素收紧尺寸；任何异常都吞掉，数值无效就不覆盖，
+           退回 style.css 里的 94vw/94vh，绝不让适配逻辑挡住灯箱 */
         function fitImg() {
-            let vw = window.innerWidth, vh = window.innerHeight;
             try {
+                let vw = Number(window.innerWidth), vh = Number(window.innerHeight);
                 const vv = window.visualViewport;
-                if (vv && vv.width && vv.height) { vw = vv.width; vh = vv.height; }
+                if (vv && Number(vv.width) > 0 && Number(vv.height) > 0) { vw = Number(vv.width); vh = Number(vv.height); }
+                if (!(vw > 0) || !(vh > 0)) return;
+                im.style.setProperty("max-width", Math.floor(vw * 0.94) + "px", "important");
+                im.style.setProperty("max-height", Math.floor(vh * 0.94) + "px", "important");
             } catch (e) {}
-            im.style.setProperty("max-width", Math.max(80, Math.floor(vw * 0.94)) + "px", "important");
-            im.style.setProperty("max-height", Math.max(80, Math.floor(vh * 0.94)) + "px", "important");
         }
         im.onload = fitImg;
         fitImg();
         if (!box.__sdgFitBound) {   /* 旋转屏 / 地址栏收起 / 双指缩放后重新适配 */
             box.__sdgFitBound = true;
-            try { (window.visualViewport || window).addEventListener("resize", fitImg); } catch (e) {}
-            window.addEventListener("resize", fitImg);
+            try { window.addEventListener("resize", fitImg); } catch (e) {}
+            try { if (window.visualViewport) window.visualViewport.addEventListener("resize", fitImg); } catch (e) {}
         }
-        im.style.width = "auto";
-        im.style.height = "auto";
-        im.style.objectFit = "contain";
-        im.style.borderRadius = "6px";
-        im.src = src;
-        box.style.display = "flex";
     }
 
     /* —— 楼层图片存储 ——
