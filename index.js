@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.14";
+    const VERSION = "1.6.15";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -807,27 +807,12 @@
             window.__sdgMesBtnObs.observe(chatEl, { childList: true, subtree: true });
             if (!window.__sdgMesBtnClick) {
                 window.__sdgMesBtnClick = true;
-                /* 坐标兜底：图片上盖着别的元素（美化插件 caption/遮罩）时 closest 够不到 img，
-                   改用点击坐标对各图矩形做命中。min 尺寸 100px 排除头像/小表情 */
-                function sdgHitImage(x, y, sel) {
-                    try {
-                        const imgs = document.querySelectorAll(sel);
-                        for (let i = 0; i < imgs.length; i++) {
-                            const r = imgs[i].getBoundingClientRect();
-                            if (r.width < 100 || r.height < 100) continue;
-                            if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return imgs[i];
-                        }
-                    } catch (e) {}
-                    return null;
-                }
-                /* 目标是可交互元素就不劫持：悬浮按钮/链接压在图上时，点击应该归它们 */
-                function sdgInteractive(t) {
-                    return !!(t.closest && t.closest('a[href],button,input,select,textarea,label,[role="button"],.interactable,.menu_button,.mes_button'));
-                }
                 /* 绑 window 捕获：比 document 更早触发，主题/美化插件在 document 上
-                   先注册的监听（stopImmediatePropagation）再也吞不掉点图/点灯箱 */
+                   先注册的监听（stopImmediatePropagation）吞不掉点图/点灯箱/插件按钮。
+                   只精确匹配插件自己的元素，不做任何全页面坐标兜底——
+                   全局拦截会在美化主题上误吞其它界面的点击（v1.6.13 的教训） */
                 let lastTouchAct = 0;   /* touch 层刚处理过的时刻：紧随其后的合成 click 一律忽略，
-                                           防止触摸刚开灯箱、合成 click 落在灯箱上又把它关上（看起来=没反应） */
+                                           防止触摸刚开灯箱、合成 click 落在灯箱上又把它关上 */
                 window.addEventListener("click", function (ev) {
                     if (Date.now() - lastTouchAct < 600) return;
                     const tg = ev.target;
@@ -876,15 +861,6 @@
                     }
                     const orphan = tg.closest("img.sdg-img");
                     if (orphan) { ev.preventDefault(); ev.stopPropagation(); openLightbox(orphan.src); return; }
-                    /* 兜底：target 不是图（被遮罩/包装）但坐标落在图上——先本插件图，再页面任意大图 */
-                    if (!sdgInteractive(tg) && (ev.clientX || ev.clientY)) {
-                        const hitSdg = sdgHitImage(ev.clientX, ev.clientY, "img.sdg-img");
-                        if (hitSdg) { ev.preventDefault(); ev.stopPropagation(); openLightbox(hitSdg.src); return; }
-                        const hitAny = sdgHitImage(ev.clientX, ev.clientY, "img");
-                        if (hitAny && !hitAny.closest("a[href],button,#sdg-lightbox")) {
-                            ev.preventDefault(); ev.stopPropagation(); openLightbox(hitAny.src); return;
-                        }
-                    }
                     const b1 = tg.closest("." + MES_BTN_REINJECT);
                     if (b1) {
                         ev.preventDefault(); ev.stopPropagation();
@@ -899,14 +875,16 @@
                         if (Number.isFinite(idx)) onRegenFloor(idx);
                     }
                 }, true);
-                /* 手机兜底：个别主题/插件在图片上吃掉合成 click，touchend 直接开/关灯箱。
+                /* 手机兜底：只认插件自己的图（closest 精确匹配），touchend 直接开/关灯箱。
                    按下到抬起位移超 10px 视为滚动，不触发 */
                 let tsX = 0, tsY = 0, tsT = 0;
                 window.addEventListener("touchstart", function (ev) {
-                    /* 每次按下都记点：遮罩盖图时 touchstart 的 target 不是图，
-                       不能靠 target 布防，交给 touchend 的位移守卫 + 坐标命中过滤 */
-                    const c0 = ev.changedTouches && ev.changedTouches[0];
-                    if (c0) { tsX = c0.clientX; tsY = c0.clientY; tsT = Date.now(); }
+                    const t0 = ev.target;
+                    tsX = -9999; tsY = -9999; tsT = 0;
+                    if (t0 && t0.closest && (t0.closest("img.sdg-img") || t0.closest("#sdg-lightbox"))) {
+                        const c0 = ev.changedTouches && ev.changedTouches[0];
+                        if (c0) { tsX = c0.clientX; tsY = c0.clientY; tsT = Date.now(); }
+                    }
                 }, true);
                 window.addEventListener("touchend", function (ev) {
                     if (Date.now() - tsT > 1500) return;
@@ -922,20 +900,11 @@
                         lb.style.display = "none";
                         return;
                     }
-                    /* 点图：closest 优先，够不到再按坐标命中（本插件图 → 页面任意大图）。
-                       目标是可交互元素时不劫持，按钮/链接照常走 click */
-                    if (!sdgInteractive(tg)) {
-                        let im = tg.closest("img.sdg-img");
-                        if (!im && (c0.clientX || c0.clientY)) im = sdgHitImage(c0.clientX, c0.clientY, "img.sdg-img");
-                        if (!im && (c0.clientX || c0.clientY)) {
-                            const any = sdgHitImage(c0.clientX, c0.clientY, "img");
-                            if (any && !any.closest("a[href],button,#sdg-lightbox")) im = any;
-                        }
-                        if (im && !im.closest("#sdg-lightbox")) {
-                            ev.preventDefault(); ev.stopPropagation();
-                            lastTouchAct = Date.now();
-                            openLightbox(im.src);
-                        }
+                    const im = tg.closest("img.sdg-img");
+                    if (im) {
+                        ev.preventDefault(); ev.stopPropagation();
+                        lastTouchAct = Date.now();
+                        openLightbox(im.src);
                     }
                 }, true);
             }
