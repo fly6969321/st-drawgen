@@ -1288,8 +1288,7 @@
             document.body.appendChild(box);
         }
         const im = box.querySelector("img");
-        /* 内联样式兜底：部分手机 WebView 不认 inset、或缓存了旧 style.css 时，
-           纯类名定位会失效让图跑进文档流——内联样式保证固定全屏居中，图绝不跑出屏幕 */
+        /* 内联样式兜底：固定全屏居中 */
         box.style.position = "fixed";
         box.style.left = "0";
         box.style.top = "0";
@@ -1299,35 +1298,27 @@
         box.style.background = "rgba(0, 0, 0, 0.85)";
         box.style.alignItems = "center";
         box.style.justifyContent = "center";
-        box.style.overflow = "auto";   /* 兜底：万一图仍超高，灯箱内可滚动看全，不跑出屏幕 */
+        box.style.overflow = "auto";
         box.style.cursor = "zoom-out";
         im.style.display = "block";
         im.style.width = "auto";
         im.style.height = "auto";
         im.style.objectFit = "contain";
         im.style.borderRadius = "6px";
-        /* 先把图和灯箱无条件显示出来，保证点击一定有反应 */
+        /* 先把灯箱和图显示出来，保证点击必有反应 */
         im.src = src;
         box.style.display = "flex";
-        /* 再按可视视口实测像素收紧尺寸；任何异常都吞掉，数值无效就不覆盖，
-           退回 style.css 里的 94vw/94vh，绝不让适配逻辑挡住灯箱 */
-        function fitImg() {
-            try {
-                let vw = Number(window.innerWidth), vh = Number(window.innerHeight);
-                const vv = window.visualViewport;
-                if (vv && Number(vv.width) > 0 && Number(vv.height) > 0) { vw = Number(vv.width); vh = Number(vv.height); }
-                if (!(vw > 0) || !(vh > 0)) return;
-                im.style.setProperty("max-width", Math.floor(vw * 0.94) + "px", "important");
-                im.style.setProperty("max-height", Math.floor(vh * 0.94) + "px", "important");
-            } catch (e) {}
-        }
-        im.onload = fitImg;
-        fitImg();
-        if (!box.__sdgFitBound) {   /* 旋转屏 / 地址栏收起 / 双指缩放后重新适配 */
-            box.__sdgFitBound = true;
-            try { window.addEventListener("resize", fitImg); } catch (e) {}
-            try { if (window.visualViewport) window.visualViewport.addEventListener("resize", fitImg); } catch (e) {}
-        }
+        /* 最后再按可视视口收紧图片尺寸；整块容错，任何异常都不影响已经弹出的灯箱，
+           拿不到视口或报错时退回 style.css 的 94vw/94vh */
+        try {
+            let vw = 0, vh = 0;
+            const vv = window.visualViewport;
+            if (vv && vv.width > 0 && vv.height > 0) { vw = vv.width; vh = vv.height; }
+            if (!(vw > 0)) vw = document.documentElement.clientWidth || window.innerWidth || 0;
+            if (!(vh > 0)) vh = document.documentElement.clientHeight || window.innerHeight || 0;
+            if (vw > 0) im.style.setProperty("max-width", Math.floor(vw * 0.94) + "px", "important");
+            if (vh > 0) im.style.setProperty("max-height", Math.floor(vh * 0.94) + "px", "important");
+        } catch (e) {}
     }
 
     /* —— 楼层图片存储 ——

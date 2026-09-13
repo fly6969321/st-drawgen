@@ -468,13 +468,15 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
     display: none;
     align-items: center;
     justify-content: center;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
     cursor: zoom-out;
 }
 #sdg-lightbox.show { display: flex; }
 #sdg-lightbox img {
-    max-width: 94vw;
-    max-height: 94vh;
-    max-height: 94dvh;
+    max-width: 94vw !important;
+    max-height: 94vh !important;
+    max-height: 94dvh !important;
     width: auto;
     height: auto;
     object-fit: contain;
