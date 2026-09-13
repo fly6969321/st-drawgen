@@ -523,8 +523,7 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
     display: none;
     align-items: center;
     justify-content: center;
-    overflow: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow: hidden;   /* 同 JS 内联兜底：灯箱内不滚动，图收在屏内 */
     cursor: zoom-out;
 }
 #sdg-lightbox.show { display: flex; }

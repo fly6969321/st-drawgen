@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.11";
+    const VERSION = "1.6.12";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -787,9 +787,16 @@
     }
     function installMesButtonsObserver() {
         try {
-            if (window.__sdgMesBtnObs) return;
             const chatEl = q("#chat");
-            if (!chatEl || typeof MutationObserver === "undefined") return;
+            if (!chatEl) {
+                /* #chat 还没挂出来：稍后重试。点击监听（点图开灯箱）不能因为初始化早而丢 */
+                if ((installMesButtonsObserver.tries || 0) < 60) {
+                    installMesButtonsObserver.tries = (installMesButtonsObserver.tries || 0) + 1;
+                    setTimeout(installMesButtonsObserver, 1000);
+                }
+                return;
+            }
+            if (window.__sdgMesBtnObs || typeof MutationObserver === "undefined") return;
             let t = null;
             window.__sdgMesBtnObs = new MutationObserver(function () {
                 if (t) clearTimeout(t);
@@ -798,11 +805,16 @@
                 }, 250);
             });
             window.__sdgMesBtnObs.observe(chatEl, { childList: true, subtree: true });
-            if (!document.__sdgMesBtnClick) {
-                document.__sdgMesBtnClick = true;
-                document.addEventListener("click", function (ev) {
+            if (!window.__sdgMesBtnClick) {
+                window.__sdgMesBtnClick = true;
+                /* 绑 window 捕获：比 document 更早触发，主题/美化插件在 document 上
+                   先注册的监听（stopImmediatePropagation）再也吞不掉点图/点灯箱 */
+                window.addEventListener("click", function (ev) {
                     const tg = ev.target;
                     if (!tg || !tg.closest) return;
+                    /* 点灯箱任意处关闭 */
+                    const lb = tg.closest("#sdg-lightbox");
+                    if (lb) { ev.preventDefault(); ev.stopPropagation(); lb.style.display = "none"; return; }
                     /* 楼里的图：生成图片 / 折叠条 / ↻ 重画 / 点图开灯箱 */
                     const slot = tg.closest(".sdg-slot");
                     if (slot) {
@@ -857,6 +869,29 @@
                         const m = b2.closest(".mes"); const idx = m ? Number(m.getAttribute("mesid")) : NaN;
                         if (Number.isFinite(idx)) onRegenFloor(idx);
                     }
+                }, true);
+                /* 手机兜底：个别主题/插件在图片上吃掉合成 click，touchend 直接开/关灯箱。
+                   按下到抬起位移超 10px 视为滚动，不触发 */
+                let tsX = 0, tsY = 0, tsT = 0;
+                window.addEventListener("touchstart", function (ev) {
+                    const t0 = ev.target;
+                    tsX = -9999; tsY = -9999; tsT = 0;
+                    if (t0 && t0.closest && (t0.closest("img.sdg-img") || t0.closest("#sdg-lightbox"))) {
+                        const c0 = ev.changedTouches && ev.changedTouches[0];
+                        if (c0) { tsX = c0.clientX; tsY = c0.clientY; tsT = Date.now(); }
+                    }
+                }, true);
+                window.addEventListener("touchend", function (ev) {
+                    if (Date.now() - tsT > 1500) return;
+                    const c0 = ev.changedTouches && ev.changedTouches[0];
+                    if (!c0) return;
+                    if (Math.abs(c0.clientX - tsX) > 10 || Math.abs(c0.clientY - tsY) > 10) return;
+                    const tg = ev.target;
+                    if (!tg || !tg.closest) return;
+                    const lb = tg.closest("#sdg-lightbox");
+                    if (lb) { ev.preventDefault(); ev.stopPropagation(); lb.style.display = "none"; return; }
+                    const im = tg.closest("img.sdg-img");
+                    if (im) { ev.preventDefault(); ev.stopPropagation(); openLightbox(im.src); }
                 }, true);
             }
         } catch (e) {}
@@ -1298,7 +1333,7 @@
         box.style.background = "rgba(0, 0, 0, 0.85)";
         box.style.alignItems = "center";
         box.style.justifyContent = "center";
-        box.style.overflow = "auto";
+        box.style.overflow = "hidden";   /* 灯箱内禁止滚动：图永远居中收在屏内，不可能滚出框 */
         box.style.cursor = "zoom-out";
         im.style.display = "block";
         im.style.width = "auto";
