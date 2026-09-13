@@ -295,7 +295,7 @@
     margin: 10px 0 2px;
     padding: 8px 12px;
     border-radius: 12px;
-    background: var(--sdg-accent-soft);
+    background: var(--sdg-btn);
     border: 1px solid var(--sdg-field-line);
     font-size: 13px;
     font-weight: 700;
