@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.7";
+    const VERSION = "1.6.8";
     const LOG = "[DrawGen]";
 
     /* ============================================================
