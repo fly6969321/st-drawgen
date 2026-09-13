@@ -470,8 +470,7 @@
     display: block;
     width: auto;
     max-width: 100%;
-    max-height: 70vh;
-    max-height: 70dvh;
+    max-height: 70vh;   /* 实际限高由 JS 以固定 px 内联（maxImgH），此处仅为 JS 未生效时的兜底 */
     height: auto;
     object-fit: contain;
     border-radius: 8px;

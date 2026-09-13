@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.13";
+    const VERSION = "1.6.14";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1487,6 +1487,15 @@
     function slotHTML(innerHtml) {
         return '<div class="sdg-slot"><div class="sdg-slot-body"></div><div class="sdg-tag">' + innerHtml + '</div></div>';
     }
+    /* 楼层图限高 = 「键盘未弹出时」视口高的 70%，定格成固定像素。
+       vh/dvh 这类视口单位在手机上会被键盘挤压：点输入框弹出键盘 → 视口变矮 → 限高跟着缩水
+       → 图按比例连宽带窄。固定 px 后键盘不再影响；视口变大（刷新/转屏）只往大更新，不往小缩 */
+    let SDG_CAP_H = 0;
+    function maxImgH() {
+        const h = document.documentElement.clientHeight || window.innerHeight || 0;
+        if (h && Math.round(h * 0.7) > SDG_CAP_H) SDG_CAP_H = Math.round(h * 0.7);
+        return SDG_CAP_H ? SDG_CAP_H + "px" : "70vh";
+    }
     /* 一个槽三种样子：生成图片按钮 / 生成中 / 折叠条+图 */
     function fillSlot(body, state, src, open, cur, total) {
         if (state === "busy") {
@@ -1513,12 +1522,12 @@
             '</div>';
         const im = body.querySelector("img");
         if (im) {
-            /* 内联样式限制楼层里图片的高度：竖版长图折叠条展开后也必须一屏内可见，点图才进灯箱 */
+            /* 内联样式限制楼层里图片的高度：竖版长图折叠条展开后也必须一屏内可见，点图才进灯箱。
+               限高用固定 px（maxImgH），不用 vh/dvh——那两个单位会被手机键盘挤压导致图缩 */
             im.style.maxWidth = "100%";
             im.style.width = "auto";
             im.style.height = "auto";
-            im.style.maxHeight = "70vh";
-            try { im.style.maxHeight = "70dvh"; } catch (e) {}
+            im.style.maxHeight = maxImgH();
             im.style.objectFit = "contain";
             im.setAttribute("src", src);
         }
@@ -1596,12 +1605,11 @@
                 img = document.createElement("img");
                 img.className = "sdg-img sdg-orphan";
                 img.alt = "生成图片";
-                /* 同 fillSlot：楼内图片限高，一屏内可见 */
+                /* 同 fillSlot：楼内图片限高，一屏内可见（固定 px，防键盘挤压缩图） */
                 img.style.maxWidth = "100%";
                 img.style.width = "auto";
                 img.style.height = "auto";
-                img.style.maxHeight = "70vh";
-                try { img.style.maxHeight = "70dvh"; } catch (e) {}
+                img.style.maxHeight = maxImgH();
                 img.style.objectFit = "contain";
                 el.appendChild(img);
             }
@@ -2580,6 +2588,16 @@
             if (cfg().showImage === false) document.body.classList.add("sdg-hide-images");
             bindEvents();
             installMesButtonsObserver();
+            /* 视口变大（转屏等）时把限高上限往上抬，已渲染的图同步放大；
+               只增不减——键盘弹出让视口变小不跟缩（点的就是图片不能缩） */
+            window.addEventListener("resize", function () {
+                try {
+                    if (!SDG_CAP_H) return;
+                    const before = SDG_CAP_H;
+                    maxImgH();
+                    if (SDG_CAP_H > before) qa("img.sdg-img").forEach(function (im) { im.style.maxHeight = SDG_CAP_H + "px"; });
+                } catch (e) {}
+            }, { passive: true });
             setTimeout(function () { renderAllImages(); installMesButtons(); }, 800);
             initialized = true;
             log("✓ 已加载 v" + VERSION);
