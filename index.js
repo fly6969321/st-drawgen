@@ -728,22 +728,29 @@
         return { injected: true, tag: tag, idx: idx, replaced: stripped !== before };
     }
 
-    /* 楼层正文变了之后让酒馆按自己的方式重排这一楼，再把标记换成图 */
+    /* 楼层正文变了之后只同步我们自己的槽，绝不整楼重绘——
+       updateMessageBlock / messageFormatting 会把美化插件渲染好的前端卡打回源码
+       （那些美化只在它们自己的事件里渲染，被别人重绘后不会重跑），得重启页面才恢复。
+       这里只动 .sdg-slot、孤儿图和标记文本节点，楼里其他节点一概不碰。 */
     function rerenderFloor(idx) {
         try {
             const c = ctx();
             const msg = (c.chat || [])[idx];
             if (!msg) return;
             const el = q('#chat .mes[mesid="' + idx + '"] .mes_text');
-            if (typeof c.updateMessageBlock === "function") {
-                c.updateMessageBlock(idx, msg);
-            } else if (el && typeof c.messageFormatting === "function") {
-                el.innerHTML = c.messageFormatting(msg.mes, msg.name, msg.is_system, msg.is_user, idx);
-            } else if (el) {
-                const tags = findAllTags(msg.mes);
-                const last = tags.length ? tags[tags.length - 1].full : "";
-                if (last && el.innerHTML.indexOf(esc(last)) < 0) el.insertAdjacentHTML("beforeend", "<p>" + esc(last) + "</p>");
+            if (!el) return;
+            const tags = findAllTags(msg.mes);
+            /* 1. 摘掉我们的旧槽和孤儿图（标记文本在渲染时已被换进槽里，摘槽即摘标记） */
+            Array.prototype.slice.call(el.querySelectorAll(".sdg-slot")).forEach(function (s) { s.remove(); });
+            const orphan = el.querySelector("img.sdg-img.sdg-orphan"); if (orphan) orphan.remove();
+            /* 2. 楼里已有的标记文本原地转成槽（只碰文本节点，美化插件的 HTML 原样不动） */
+            replaceMarkersInDom(el);
+            /* 3. 还缺的标记（刚注入到楼尾的那条）补一个文本节点再转一次 */
+            const made = el.querySelectorAll(".sdg-slot").length;
+            for (let k = made; k < tags.length; k++) {
+                el.appendChild(document.createTextNode("\n\n" + tags[k].full));
             }
+            if (tags.length > made) replaceMarkersInDom(el);
         } catch (e) { log("rerenderFloor:", e.message); }
         setTimeout(function () { try { renderFloorImage(idx); installMesButtons(); } catch (e) {} }, 60);
     }
@@ -1277,11 +1284,32 @@
             box = document.createElement("div");
             box.id = "sdg-lightbox";
             box.innerHTML = '<img alt="">';
-            box.addEventListener("click", function () { box.classList.remove("show"); });
+            box.addEventListener("click", function () { box.style.display = "none"; });
             document.body.appendChild(box);
         }
-        box.querySelector("img").src = src;
-        box.classList.add("show");
+        const im = box.querySelector("img");
+        /* 内联样式兜底：部分手机 WebView 不认 inset、或缓存了旧 style.css 时，
+           纯类名定位会失效让图跑进文档流——内联样式保证固定全屏居中，图绝不跑出屏幕 */
+        box.style.position = "fixed";
+        box.style.left = "0";
+        box.style.top = "0";
+        box.style.right = "0";
+        box.style.bottom = "0";
+        box.style.zIndex = "99999";
+        box.style.background = "rgba(0, 0, 0, 0.85)";
+        box.style.alignItems = "center";
+        box.style.justifyContent = "center";
+        box.style.cursor = "zoom-out";
+        im.style.display = "block";
+        im.style.maxWidth = "94vw";
+        im.style.maxHeight = "94vh";
+        try { im.style.maxHeight = "94dvh"; } catch (e) {}   /* 老内核不认 dvh 时保留 94vh */
+        im.style.width = "auto";
+        im.style.height = "auto";
+        im.style.objectFit = "contain";
+        im.style.borderRadius = "6px";
+        im.src = src;
+        box.style.display = "flex";
     }
 
     /* —— 楼层图片存储 ——

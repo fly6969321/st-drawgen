@@ -456,7 +456,10 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
    ============================================================ */
 #sdg-lightbox {
     position: fixed;
-    inset: 0;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
     z-index: 10000;
     background: rgba(0, 0, 0, 0.84);
     display: none;
@@ -466,8 +469,12 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
 }
 #sdg-lightbox.show { display: flex; }
 #sdg-lightbox img {
-    max-width: 95vw;
-    max-height: 95vh;
+    max-width: 94vw;
+    max-height: 94vh;
+    max-height: 94dvh;
+    width: auto;
+    height: auto;
+    object-fit: contain;
     border-radius: 6px;
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
 }
