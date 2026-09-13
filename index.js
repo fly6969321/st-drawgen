@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.5";
+    const VERSION = "1.6.6";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2083,7 +2083,7 @@
                             '<button type="button" id="sdg-btn-generate" class="sdg-primary">生图</button>' +
                             '<button type="button" id="sdg-btn-stop" class="sdg-danger">停止</button>' +
                         '</div>' +
-                        '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">🍰 分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
+                        '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
                         '<div id="sdg-layers"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
                             '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围场景没换时自动沿用上一楼；↻ 只重摇这一层</div>' +
                             layerRowsHTML() +

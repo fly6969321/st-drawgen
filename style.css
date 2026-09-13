@@ -310,39 +310,34 @@
 }
 #sdg-panel label.sdg-layered-bar.sdg-on .sdg-layered-txt { color: var(--sdg-accent); }
 
-/* 滑动开关本体 */
+/* 滑动开关本体：input 上不能画伪元素，圆点用径向渐变背景画，靠 background-position 滑动 */
 #sdg-panel label.sdg-layered-bar input#sdg-layered {
-    width: 44px !important;
-    min-width: 44px !important;
-    max-width: 44px !important;
-    height: 24px !important;
-    min-height: 24px !important;
-    max-height: 24px !important;
-    border-radius: 999px !important;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    width: 46px !important;
+    min-width: 46px !important;
+    max-width: 46px !important;
+    height: 26px !important;
+    min-height: 26px !important;
+    max-height: 26px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    flex: 0 0 auto !important;
     border: none !important;
-    background: rgba(128, 128, 128, 0.30) !important;
-    background-image: none !important;
-    position: relative;
-    transition: background 0.18s;
-}
-#sdg-panel label.sdg-layered-bar input#sdg-layered::after {
-    content: "";
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: #ffffff;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-    transition: transform 0.18s;
+    border-radius: 999px !important;
+    background-color: rgba(128, 128, 128, 0.32) !important;
+    background-image: radial-gradient(circle 10px at 50% 50%, #ffffff 9.5px, rgba(255, 255, 255, 0) 10px) !important;
+    background-size: 20px 20px !important;
+    background-repeat: no-repeat !important;
+    background-position: 3px center !important;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.15) !important;
+    cursor: pointer;
+    transition: background-color 0.18s, background-position 0.18s;
 }
 #sdg-panel label.sdg-layered-bar input#sdg-layered:checked {
-    background: var(--sdg-accent) !important;
-    border: none !important;
-}
-#sdg-panel label.sdg-layered-bar input#sdg-layered:checked::after {
-    transform: translateX(20px);
+    background-color: var(--sdg-accent) !important;
+    background-position: 23px center !important;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1) !important;
 }
 
 /* —— 复选框自己画，不让酒馆主题吃掉（之前只剩文字没有框） —— */
