@@ -1422,7 +1422,17 @@
             '<div class="sdg-imgbox"' + (open ? "" : ' style="display:none"') + '>' +
                 '<img class="sdg-img" alt="生成图片">' +
             '</div>';
-        body.querySelector("img").setAttribute("src", src);
+        const im = body.querySelector("img");
+        if (im) {
+            /* 内联样式限制楼层里图片的高度：竖版长图折叠条展开后也必须一屏内可见，点图才进灯箱 */
+            im.style.maxWidth = "100%";
+            im.style.width = "auto";
+            im.style.height = "auto";
+            im.style.maxHeight = "70vh";
+            try { im.style.maxHeight = "70dvh"; } catch (e) {}
+            im.style.objectFit = "contain";
+            im.setAttribute("src", src);
+        }
     }
 
     /* 在 mes_text 里只找「文本节点」里的标记，切成槽，其余节点（别的美化插件渲染的 HTML）原样不动。
@@ -1497,6 +1507,13 @@
                 img = document.createElement("img");
                 img.className = "sdg-img sdg-orphan";
                 img.alt = "生成图片";
+                /* 同 fillSlot：楼内图片限高，一屏内可见 */
+                img.style.maxWidth = "100%";
+                img.style.width = "auto";
+                img.style.height = "auto";
+                img.style.maxHeight = "70vh";
+                try { img.style.maxHeight = "70dvh"; } catch (e) {}
+                img.style.objectFit = "contain";
                 el.appendChild(img);
             }
             if (img.getAttribute("src") !== src) img.setAttribute("src", src);

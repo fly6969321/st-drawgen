@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "fly6969321",
-    "version": "1.6.1",
+    "version": "1.6.2",
     "homePage": "https://github.com/fly6969321/st-drawgen",
     "description": "独立生图插件：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → Grok / Gemini 生图 → 标记原位换成图片（一楼多标记多图）。生图页 / 提取页两个页签卡片、日夜主题、扩展抽屉入口。"
 }
