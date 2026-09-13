@@ -288,26 +288,62 @@
 }
 #sdg-panel label.sdg-chk input { width: auto; margin: 0; }
 
-/* —— 分层提取：醒目开关条（开 = 蓝描边 + 蓝字 + 浅蓝底） —— */
+/* —— 分层提取：栏 + iOS 风格圆圈开关（开 = 栏亮蓝 + 蓝字，下方自动展开五层区） —— */
 #sdg-panel label.sdg-layered-bar {
     width: 100%;
     box-sizing: border-box;
     margin: 10px 0 2px;
-    padding: 10px 12px;
-    border-radius: 10px;
+    padding: 8px 12px;
+    border-radius: 12px;
     background: var(--sdg-accent-soft);
     border: 1px solid var(--sdg-field-line);
     font-size: 13px;
     font-weight: 700;
-    transition: background 0.15s, border-color 0.15s;
+    justify-content: space-between;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
-#sdg-panel label.sdg-layered-bar span { color: var(--sdg-fg); }
+#sdg-panel label.sdg-layered-bar .sdg-layered-txt { color: var(--sdg-fg); letter-spacing: 0.02em; }
 #sdg-panel label.sdg-layered-bar.sdg-on {
-    border: 2px solid var(--sdg-accent);
+    border: 1.5px solid var(--sdg-accent);
+    padding: 7.5px 11.5px;
     box-shadow: 0 0 0 2px var(--sdg-accent-soft);
-    padding: 9px 11px;
 }
-#sdg-panel label.sdg-layered-bar.sdg-on span { color: var(--sdg-accent); }
+#sdg-panel label.sdg-layered-bar.sdg-on .sdg-layered-txt { color: var(--sdg-accent); }
+
+/* 滑动开关本体 */
+#sdg-panel label.sdg-layered-bar input#sdg-layered {
+    width: 44px !important;
+    min-width: 44px !important;
+    max-width: 44px !important;
+    height: 24px !important;
+    min-height: 24px !important;
+    max-height: 24px !important;
+    border-radius: 999px !important;
+    border: none !important;
+    background: rgba(128, 128, 128, 0.30) !important;
+    background-image: none !important;
+    position: relative;
+    transition: background 0.18s;
+}
+#sdg-panel label.sdg-layered-bar input#sdg-layered::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    transition: transform 0.18s;
+}
+#sdg-panel label.sdg-layered-bar input#sdg-layered:checked {
+    background: var(--sdg-accent) !important;
+    border: none !important;
+}
+#sdg-panel label.sdg-layered-bar input#sdg-layered:checked::after {
+    transform: translateX(20px);
+}
 
 /* —— 复选框自己画，不让酒馆主题吃掉（之前只剩文字没有框） —— */
 #sdg-panel input[type="checkbox"],

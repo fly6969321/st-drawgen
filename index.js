@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.4";
+    const VERSION = "1.6.5";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2083,7 +2083,7 @@
                             '<button type="button" id="sdg-btn-generate" class="sdg-primary">生图</button>' +
                             '<button type="button" id="sdg-btn-stop" class="sdg-danger">停止</button>' +
                         '</div>' +
-                        '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '><span>🍰 分层提取（五层各一框一锁，可只重摇一层）</span></label>' +
+                        '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">🍰 分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
                         '<div id="sdg-layers"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
                             '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围场景没换时自动沿用上一楼；↻ 只重摇这一层</div>' +
                             layerRowsHTML() +
@@ -2430,15 +2430,12 @@
                 '</div>' +
                 '<div class="inline-drawer-content">' +
                     '<div class="sdgd-row">' +
-                        '<button type="button" id="sdgd-open">打开面板</button>' +
                         '<select id="sdgd-theme">' +
                             '<option value="night"' + (c.theme !== "day" ? " selected" : "") + '>🌙 夜版</option>' +
                             '<option value="day"' + (c.theme === "day" ? " selected" : "") + '>🌞 日版</option>' +
                         '</select>' +
                     '</div>' +
-                    '<label class="sdgd-chk"><input type="checkbox" id="sdgd-enabled"' + (c.enabled ? " checked" : "") + '><span>启用生图工坊</span></label>' +
-                    '<label class="sdgd-chk"><input type="checkbox" id="sdgd-ball"' + (c.showBall !== false ? " checked" : "") + '><span>显示悬浮球</span></label>' +
-                    '<small class="sdgd-note">v' + VERSION + ' · 完整设置在面板里</small>' +
+                    '<small class="sdgd-note">v' + VERSION + ' · 点标题栏打开面板</small>' +
                 '</div>' +
             '</div>' +
         '</div>';
@@ -2451,17 +2448,10 @@
             return;
         }
         host.insertAdjacentHTML("beforeend", drawerHTML());
-        q("#sdgd-open").addEventListener("click", function () { showPanel(true); });
+        /* 点插件名标题栏直接弹出面板 */
+        const dHead = q("#sdgd-root .inline-drawer-toggle");
+        if (dHead) dHead.addEventListener("click", function () { showPanel(true); });
         q("#sdgd-theme").addEventListener("change", function (ev) { save("theme", ev.target.value); applyTheme(); });
-        q("#sdgd-enabled").addEventListener("change", function (ev) {
-            save("enabled", ev.target.checked);
-            const el = q("#sdg-enabled"); if (el) el.checked = ev.target.checked;
-        });
-        q("#sdgd-ball").addEventListener("change", function (ev) {
-            save("showBall", ev.target.checked);
-            applyBallVisible();
-            const el = q("#sdg-show-ball"); if (el) el.checked = ev.target.checked;
-        });
     }
     function syncDrawer() {
         const a = q("#sdgd-enabled"); if (a) a.checked = !!cfg().enabled;
