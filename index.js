@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.0";
+    const VERSION = "1.6.4";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2083,7 +2083,7 @@
                             '<button type="button" id="sdg-btn-generate" class="sdg-primary">生图</button>' +
                             '<button type="button" id="sdg-btn-stop" class="sdg-danger">停止</button>' +
                         '</div>' +
-                        '<div class="sdg-row">' + chk("sdg-layered", "layered", "分层提取") + '</div>' +
+                        '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '><span>🍰 分层提取（五层各一框一锁，可只重摇一层）</span></label>' +
                         '<div id="sdg-layers"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
                             '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围场景没换时自动沿用上一楼；↻ 只重摇这一层</div>' +
                             layerRowsHTML() +
@@ -2170,7 +2170,9 @@
         q("#sdg-layered").addEventListener("change", function (ev) {
             save("layered", ev.target.checked);
             const box = q("#sdg-layers"); if (box) box.style.display = ev.target.checked ? "" : "none";
+            const bar = q("#sdg-layered-bar"); if (bar) bar.classList.toggle("sdg-on", !!ev.target.checked);
         });
+        const sdgLBar = q("#sdg-layered-bar"); if (sdgLBar) sdgLBar.classList.toggle("sdg-on", !!cfg().layered);
         qa(".sdg-lock-chk").forEach(function (el) {
             el.addEventListener("change", function () {
                 const lk = Object.assign({}, layerLocks());
