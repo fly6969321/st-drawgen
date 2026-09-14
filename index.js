@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.17";
+    const VERSION = "1.6.18";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -813,9 +813,6 @@
                 window.addEventListener("click", function (ev) {
                     const tg = ev.target;
                     if (!tg || !tg.closest) return;
-                    /* 点灯箱任意处关闭 */
-                    const lb = tg.closest("#sdg-lightbox");
-                    if (lb) { ev.preventDefault(); ev.stopPropagation(); lb.style.display = "none"; return; }
                     /* 楼里：生成图片 / 折叠条 / ↻ 重画 / 翻页（点图在图片自己身上，见 fillSlot/孤儿图） */
                     const slot = tg.closest(".sdg-slot");
                     if (slot) {
@@ -1285,50 +1282,8 @@
     }
 
     /* ============================================================
-       显示：标记原位换图 + 灯箱
+       显示：标记原位换图
        ============================================================ */
-    function openLightbox(src) {
-        let box = q("#sdg-lightbox");
-        if (!box) {
-            box = document.createElement("div");
-            box.id = "sdg-lightbox";
-            box.innerHTML = '<img alt="">';
-            box.addEventListener("click", function () { box.style.display = "none"; });
-            document.body.appendChild(box);
-        }
-        const im = box.querySelector("img");
-        /* 内联样式兜底：固定全屏居中 */
-        box.style.position = "fixed";
-        box.style.left = "0";
-        box.style.top = "0";
-        box.style.right = "0";
-        box.style.bottom = "0";
-        box.style.zIndex = "99999";
-        box.style.background = "rgba(0, 0, 0, 0.85)";
-        box.style.alignItems = "center";
-        box.style.justifyContent = "center";
-        box.style.overflow = "hidden";   /* 灯箱内禁止滚动：图永远居中收在屏内，不可能滚出框 */
-        box.style.cursor = "zoom-out";
-        im.style.display = "block";
-        im.style.width = "auto";
-        im.style.height = "auto";
-        im.style.objectFit = "contain";
-        im.style.borderRadius = "6px";
-        /* 先把灯箱和图显示出来，保证点击必有反应 */
-        im.src = src;
-        box.style.display = "flex";
-        /* 最后再按可视视口收紧图片尺寸；整块容错，任何异常都不影响已经弹出的灯箱，
-           拿不到视口或报错时退回 style.css 的 94vw/94vh */
-        try {
-            let vw = 0, vh = 0;
-            const vv = window.visualViewport;
-            if (vv && vv.width > 0 && vv.height > 0) { vw = vv.width; vh = vv.height; }
-            if (!(vw > 0)) vw = document.documentElement.clientWidth || window.innerWidth || 0;
-            if (!(vh > 0)) vh = document.documentElement.clientHeight || window.innerHeight || 0;
-            if (vw > 0) im.style.setProperty("max-width", Math.floor(vw * 0.94) + "px", "important");
-            if (vh > 0) im.style.setProperty("max-height", Math.floor(vh * 0.94) + "px", "important");
-        } catch (e) {}
-    }
 
     /* —— 楼层图片存储 ——
        extra.sdg_gal = { "<swipe_id>": { "<槽位>": { list: [url,...], cur: 下标 } } }
@@ -1437,12 +1392,11 @@
         }
         body.innerHTML =
             '<div class="sdg-bar' + (open ? "" : " closed") + '">' +
-                '<span class="sdg-bar-l"><span class="sdg-caret">▼</span> 📷 点击查看图片</span>' +
+                '<span class="sdg-bar-l"><span class="sdg-caret">▼</span><span class="sdg-bar-ico">📷</span><span class="sdg-bar-txt">点击查看图片</span></span>' +
                 '<span class="sdg-bar-r">' +
                     (total > 1
                         ? '<span class="sdg-pager"><button type="button" class="sdg-pg" data-d="-1" title="上一张">‹</button><span class="sdg-pgn">' + (cur + 1) + '/' + total + '</span><button type="button" class="sdg-pg" data-d="1" title="下一张">›</button></span>'
                         : '') +
-                    '<span class="sdg-state">' + (open ? "已展开" : "已折叠") + '</span>' +
                     '<button type="button" class="sdg-slot-regen" title="重新生成一张（旧图保留可翻看）">↻ 重画</button>' +
                 '</span>' +
             '</div>' +
@@ -1451,20 +1405,13 @@
             '</div>';
         const im = body.querySelector("img");
         if (im) {
-            /* 内联样式限制楼层里图片的高度：竖版长图折叠条展开后也必须一屏内可见，点图才进灯箱。
+            /* 内联样式限制楼层里图片的高度：竖版长图折叠条展开后也尽量一屏内可见。
                限高用固定 px（maxImgH），不用 vh/dvh——那两个单位会被手机键盘挤压导致图缩 */
             im.style.maxWidth = "100%";
             im.style.width = "auto";
             im.style.height = "auto";
             im.style.maxHeight = maxImgH();
             im.style.objectFit = "contain";
-            /* 点图看原图：就地绑定（智慧姬式）——监听在图片自己身上，
-               不经全局层，和主题的触摸处理天然错开；重渲染即重建重绑 */
-            im.addEventListener("click", function (ev) {
-                ev.preventDefault();
-                ev.stopPropagation();
-                openLightbox(im.src);
-            });
             im.setAttribute("src", src);
         }
     }
@@ -1547,12 +1494,6 @@
                 img.style.height = "auto";
                 img.style.maxHeight = maxImgH();
                 img.style.objectFit = "contain";
-                /* 点图看原图：就地绑定，同 fillSlot */
-                img.addEventListener("click", function (ev) {
-                    ev.preventDefault();
-                    ev.stopPropagation();
-                    openLightbox(img.src);
-                });
                 el.appendChild(img);
             }
             if (img.getAttribute("src") !== src) img.setAttribute("src", src);
@@ -1717,8 +1658,6 @@
                 setImage(msg, slot, image);
                 if (!injectRecord(msg)) rememberInject(msg, buildInjectTag(desc, null), desc, null);
                 try { if (typeof ctx().saveChat === "function") ctx().saveChat(); } catch (eS) {}
-            } else {
-                openLightbox(image);
             }
             const dur = ((Date.now() - t0) / 1000).toFixed(1);
             setStatus("生图完成，耗时 " + dur + " 秒 ✓", C_OK);
@@ -2014,6 +1953,66 @@
     function textArea(id, key, rows, ph) {
         return '<textarea id="' + id + '" rows="' + (rows || 2) + '"' + (ph ? ' placeholder="' + esc(ph) + '"' : "") + '>' + esc(cfg()[key]) + '</textarea>';
     }
+    /* 带“放大编辑”按钮的多行字段：不打开时就是原来的小文本框，点 ⛶ 在大面板里编辑 */
+    function bigField(id, key, rows, ph, label) {
+        return '<div class="sdg-field sdg-bigfield">' +
+            '<label><span>' + label + '</span>' +
+            '<button type="button" class="sdg-bigedit" data-target="' + id + '" data-title="' + esc(label) + '" title="在大面板里编辑">⛶ 放大</button></label>' +
+            textArea(id, key, rows, ph) +
+        '</div>';
+    }
+    function fireChange(el) {   /* 写回后触发原有 input/change 保存逻辑，兼容老内核 */
+        ["input", "change"].forEach(function (nm) {
+            let ev = null;
+            try { ev = new Event(nm, { bubbles: true }); }
+            catch (e) { try { ev = document.createEvent("HTMLEvents"); ev.initEvent(nm, true, false); } catch (e2) {} }
+            if (ev) el.dispatchEvent(ev);
+        });
+    }
+    /* 通用大编辑面板：把小 textarea 放到全屏大面板里编辑，保存即回填并走原保存逻辑 */
+    function openBigEditor(target, title) {
+        if (!target) return;
+        let mask = q("#sdg-editor");
+        if (!mask) {
+            mask = document.createElement("div");
+            mask.id = "sdg-editor";
+            mask.innerHTML =
+                '<div class="sdg-editor-card">' +
+                    '<div class="sdg-editor-head"><span class="sdg-editor-title"></span>' +
+                        '<button type="button" class="sdg-editor-x" title="关闭（Esc）">✕</button></div>' +
+                    '<textarea class="sdg-editor-ta" spellcheck="false"></textarea>' +
+                    '<div class="sdg-editor-foot"><span class="sdg-editor-hint">Ctrl+Enter 保存 · Esc 取消</span>' +
+                        '<span class="sdg-editor-btns">' +
+                            '<button type="button" class="sdg-editor-cancel">取消</button>' +
+                            '<button type="button" class="sdg-editor-save">保存</button>' +
+                        '</span></div>' +
+                '</div>';
+            document.body.appendChild(mask);
+            const ta = mask.querySelector(".sdg-editor-ta");
+            const close = function () { mask.style.display = "none"; };
+            const save = function () {
+                const tg = mask.__target;
+                if (tg) { tg.value = ta.value; fireChange(tg); }
+                close();
+            };
+            mask.querySelector(".sdg-editor-x").addEventListener("click", close);
+            mask.querySelector(".sdg-editor-cancel").addEventListener("click", close);
+            mask.querySelector(".sdg-editor-save").addEventListener("click", save);
+            mask.addEventListener("click", function (e) { if (e.target === mask) close(); });
+            ta.addEventListener("keydown", function (e) {
+                if (e.key === "Escape") { e.preventDefault(); close(); }
+                else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); save(); }
+            });
+            mask.__ta = ta;
+        }
+        mask.__target = target;
+        mask.querySelector(".sdg-editor-title").textContent = title || "编辑";
+        const pnl = q("#sdg-panel");
+        mask.setAttribute("data-theme", (pnl && pnl.getAttribute("data-theme")) || "night");
+        mask.__ta.value = target.value != null ? target.value : "";
+        mask.style.display = "flex";
+        setTimeout(function () { try { mask.__ta.focus(); } catch (e) {} }, 30);
+    }
     function layerRowsHTML() {
         const locks = layerLocks();
         return LAYERS.map(function (l) {
@@ -2123,8 +2122,8 @@
                     /* —— 画风：跟提取规则分开的独立分区，可存多个 —— */
                     '<h5>🎨 画风（管生图风格）</h5>' +
                     presetRowHTML("style", "画风预设") +
-                    field("风格词（拼在描述前）", textArea("sdg-gen-fixed", "genFixedPrompt", 3, "例：Korean semi-realistic anime, ultra-detailed digital painting…")) +
-                    field("后缀词（拼在描述后）", textArea("sdg-gen-postfix", "genPostfixPrompt", 2, "例：masterpiece, best quality")) +
+                    bigField("sdg-gen-fixed", "genFixedPrompt", 3, "例：Korean semi-realistic anime, ultra-detailed digital painting…", "风格词（拼在描述前）") +
+                    bigField("sdg-gen-postfix", "genPostfixPrompt", 2, "例：masterpiece, best quality", "后缀词（拼在描述后）") +
                     '<div class="sdg-hint">画风只影响出图风格，不会发给副AI；跟下面的「提取规则」是两回事</div>' +
 
                     '<h5>📝 提取规则（管副AI怎么写描述）</h5>' +
@@ -2136,7 +2135,7 @@
                     '<textarea id="sdg-sys-value" rows="4"></textarea>' +
                     '<div class="sdg-btns"><button type="button" id="sdg-sys-save">保存系统提示</button></div>' +
                     presetRowHTML("rules", "提取规则预设") +
-                    field("提取规则", textArea("sdg-rules", "extRules", 3, "给副AI的额外要求，例：只写可见画面、不要心理活动、镜头别太远……")) +
+                    bigField("sdg-rules", "extRules", 3, "给副AI的额外要求，例：只写可见画面、不要心理活动、镜头别太远……", "提取规则") +
                     presetRowHTML("anchors", "角色锚点预设") +
                     field("角色锚点", textArea("sdg-anchors", "extAnchors", 3, "角色名：外貌描述……")) +
                     field("注入模板", textArea("sdg-template", "template", 2, DEFAULT_TEMPLATE)) +
@@ -2183,6 +2182,13 @@
         });
         q("#sdg-panel-close").addEventListener("click", function () { showPanel(false); });
         q("#sdg-theme").addEventListener("click", toggleTheme);
+        qa(".sdg-bigedit").forEach(function (b) {
+            b.addEventListener("click", function (ev) {
+                ev.preventDefault(); ev.stopPropagation();
+                const t = q("#" + b.getAttribute("data-target"));
+                if (t) openBigEditor(t, b.getAttribute("data-title"));
+            });
+        });
 
         /* 页签 */
         qa(".sdg-tab").forEach(function (b) {
@@ -2430,9 +2436,8 @@
         try {
             if (!c.genEndpoint) throw new Error("请先填写生图 API 地址");
             setStatus("测试生图（会真实生成一张图）…", C_OK);
-            const { image } = await generateImage("a simple red apple on a white table");
-            openLightbox(image);
-            setStatus("生图连接成功 ✓", C_OK);
+            await generateImage("a simple red apple on a white table");
+            setStatus("生图连接成功 ✓（已成功生成一张测试图）", C_OK);
         } catch (e) {
             setStatus("生图连接失败：" + (e && e.message || e), C_ERR);
         }
