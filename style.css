@@ -509,24 +509,27 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
 /* ============================================================
    多行字段“放大编辑”按钮 + 大编辑面板
    ============================================================ */
-#sdg-panel .sdg-bigfield > label {
-    display: flex;
+.sdg-bigwrap { position: relative; }
+.sdg-bigwrap > textarea { resize: none; padding-right: 24px; }
+.sdg-grip {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    width: 20px;
+    height: 18px;
+    padding: 0;
+    display: inline-flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
-.sdg-bigedit {
-    flex: 0 0 auto;
-    padding: 1px 9px;
-    border-radius: 7px;
-    border: 1px solid var(--sdg-field-line);
-    background: var(--sdg-btn);
+    justify-content: center;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
     color: var(--sdg-fg2);
-    font-size: 10.5px;
-    line-height: 1.6;
+    opacity: 0.5;
     cursor: pointer;
 }
-.sdg-bigedit:hover { color: var(--sdg-fg); filter: brightness(1.12); }
+.sdg-grip svg { width: 13px; height: 13px; display: block; }
+.sdg-grip:hover { opacity: 1; color: var(--sdg-fg); background: var(--sdg-line); }
 
 #sdg-editor {
     position: fixed;
@@ -534,14 +537,17 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
     z-index: 10001;
     background: rgba(0, 0, 0, 0.55);
     display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 4vh 4vw;
+    align-items: safe center;
+    justify-content: safe center;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
 }
 #sdg-editor .sdg-editor-card {
     width: min(860px, 94vw);
-    height: min(80vh, 720px);
-    max-height: 92vh;
+    height: min(720px, 88vh);
+    max-width: 94%;
+    max-height: 94%;
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     background: var(--sdg-bg);
@@ -608,8 +614,7 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
     font-weight: 600;
 }
 @media (max-width: 720px) {
-    #sdg-editor { padding: 2vh 2vw; }
-    #sdg-editor .sdg-editor-card { width: 96vw; height: 88vh; }
+    #sdg-editor .sdg-editor-card { width: 96vw; }
 }
 
 /* ============================================================

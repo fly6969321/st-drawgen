@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.19";
+    const VERSION = "1.6.20";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1953,12 +1953,15 @@
     function textArea(id, key, rows, ph) {
         return '<textarea id="' + id + '" rows="' + (rows || 2) + '"' + (ph ? ' placeholder="' + esc(ph) + '"' : "") + '>' + esc(cfg()[key]) + '</textarea>';
     }
-    /* 带“放大编辑”按钮的多行字段：不打开时就是原来的小文本框，点 ⛶ 在大面板里编辑 */
+    /* 带“放大编辑”的多行字段：不打开时就是原来的小文本框，点右下角对角图标在大面板里编辑 */
+    const SDG_GRIP_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5"/><path d="M15 4h5v5"/><path d="M9 20H4v-5"/><path d="M15 20h5v-5"/></svg>';
     function bigField(id, key, rows, ph, label) {
         return '<div class="sdg-field sdg-bigfield">' +
-            '<label><span>' + label + '</span>' +
-            '<button type="button" class="sdg-bigedit" data-target="' + id + '" data-title="' + esc(label) + '" title="在大面板里编辑">⛶ 放大</button></label>' +
-            textArea(id, key, rows, ph) +
+            '<label>' + label + '</label>' +
+            '<div class="sdg-bigwrap">' +
+                textArea(id, key, rows, ph) +
+                '<button type="button" class="sdg-grip" data-target="' + id + '" data-title="' + esc(label) + '" title="在大面板里编辑" tabindex="-1">' + SDG_GRIP_SVG + '</button>' +
+            '</div>' +
         '</div>';
     }
     function fireChange(el) {   /* 写回后触发原有 input/change 保存逻辑，兼容老内核 */
@@ -1969,7 +1972,14 @@
             if (ev) el.dispatchEvent(ev);
         });
     }
-    /* 通用大编辑面板：把小 textarea 放到全屏大面板里编辑，保存即回填并走原保存逻辑 */
+    function sdgViewport() {   /* 可视视口（排除手机状态栏/地址栏/键盘），拿不到再退回布局视口 */
+        const vv = window.visualViewport;
+        const vw = (vv && vv.width) || document.documentElement.clientWidth || window.innerWidth || 0;
+        const vh = (vv && vv.height) || document.documentElement.clientHeight || window.innerHeight || 0;
+        return { vw: vw, vh: vh, ot: (vv && vv.offsetTop) || 0, ol: (vv && vv.offsetLeft) || 0 };
+    }
+    /* 通用大编辑面板：把小 textarea 放到大面板里编辑，保存即回填并走原保存逻辑。
+       遮罩与卡片都按可视视口像素定位，手机上稳定居中、不被状态栏/地址栏裁掉 */
     function openBigEditor(target, title) {
         if (!target) return;
         let mask = q("#sdg-editor");
@@ -1989,12 +1999,32 @@
                 '</div>';
             document.body.appendChild(mask);
             const ta = mask.querySelector(".sdg-editor-ta");
+            const card = mask.querySelector(".sdg-editor-card");
             const close = function () { mask.style.display = "none"; };
             const save = function () {
                 const tg = mask.__target;
                 if (tg) { tg.value = ta.value; fireChange(tg); }
                 close();
             };
+            /* 按可视视口像素定位遮罩和卡片：居中且永远收在可视区内 */
+            const place = function () {
+                try {
+                    const vp = sdgViewport();
+                    if (!(vp.vw > 0) || !(vp.vh > 0)) return;
+                    mask.style.position = "fixed";
+                    mask.style.left = vp.ol + "px";
+                    mask.style.top = vp.ot + "px";
+                    mask.style.width = vp.vw + "px";
+                    mask.style.height = vp.vh + "px";
+                    mask.style.right = "auto";
+                    mask.style.bottom = "auto";
+                    card.style.width = Math.min(860, Math.floor(vp.vw * 0.94)) + "px";
+                    card.style.height = Math.min(720, Math.floor(vp.vh * 0.88)) + "px";
+                    card.style.maxWidth = "94%";
+                    card.style.maxHeight = "94%";
+                } catch (e) {}
+            };
+            mask.__place = place;
             mask.querySelector(".sdg-editor-x").addEventListener("click", close);
             mask.querySelector(".sdg-editor-cancel").addEventListener("click", close);
             mask.querySelector(".sdg-editor-save").addEventListener("click", save);
@@ -2003,6 +2033,13 @@
                 if (e.key === "Escape") { e.preventDefault(); close(); }
                 else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); save(); }
             });
+            try {
+                if (window.visualViewport) {
+                    window.visualViewport.addEventListener("resize", place);
+                    window.visualViewport.addEventListener("scroll", place);
+                }
+                window.addEventListener("resize", place);
+            } catch (e) {}
             mask.__ta = ta;
         }
         mask.__target = target;
@@ -2011,7 +2048,8 @@
         mask.setAttribute("data-theme", (pnl && pnl.getAttribute("data-theme")) || "night");
         mask.__ta.value = target.value != null ? target.value : "";
         mask.style.display = "flex";
-        setTimeout(function () { try { mask.__ta.focus(); } catch (e) {} }, 30);
+        if (mask.__place) mask.__place();
+        setTimeout(function () { try { if (mask.__place) mask.__place(); mask.__ta.focus(); } catch (e) {} }, 30);
     }
     function layerRowsHTML() {
         const locks = layerLocks();
@@ -2182,7 +2220,7 @@
         });
         q("#sdg-panel-close").addEventListener("click", function () { showPanel(false); });
         q("#sdg-theme").addEventListener("click", toggleTheme);
-        qa(".sdg-bigedit").forEach(function (b) {
+        qa(".sdg-grip").forEach(function (b) {
             b.addEventListener("click", function (ev) {
                 ev.preventDefault(); ev.stopPropagation();
                 const t = q("#" + b.getAttribute("data-target"));
