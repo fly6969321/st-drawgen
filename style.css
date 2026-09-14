@@ -461,8 +461,6 @@
 }
 .sdg-pg:hover { background: rgba(128, 128, 128, 0.26); }
 .sdg-pgn { font-size: 11px; opacity: 0.8; min-width: 30px; text-align: center; }
-.sdg-caret { display: inline-flex; align-items: center; font-size: 10px; transition: transform 0.15s; }
-.sdg-bar.closed .sdg-caret { transform: rotate(-90deg); }
 .sdg-imgbox { position: relative; margin-top: 6px; }
 .sdg-img {
     display: block;

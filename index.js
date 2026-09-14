@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.18";
+    const VERSION = "1.6.19";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1392,7 +1392,7 @@
         }
         body.innerHTML =
             '<div class="sdg-bar' + (open ? "" : " closed") + '">' +
-                '<span class="sdg-bar-l"><span class="sdg-caret">▼</span><span class="sdg-bar-ico">📷</span><span class="sdg-bar-txt">点击查看图片</span></span>' +
+                '<span class="sdg-bar-l"><span class="sdg-bar-ico">📷</span><span class="sdg-bar-txt">点击查看图片</span></span>' +
                 '<span class="sdg-bar-r">' +
                     (total > 1
                         ? '<span class="sdg-pager"><button type="button" class="sdg-pg" data-d="-1" title="上一张">‹</button><span class="sdg-pgn">' + (cur + 1) + '/' + total + '</span><button type="button" class="sdg-pg" data-d="1" title="下一张">›</button></span>'
