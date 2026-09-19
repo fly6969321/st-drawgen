@@ -8,13 +8,13 @@
  *    没图的标记显示「生成图片」按钮，出图后是折叠条，重画保留历史可翻页
  *  · 面板两个页签卡片「🎨 生图」「📝 提取」；日版 / 夜版主题；酒馆扩展抽屉里有入口块
  *  · 生图 / 提取各自多站点；画风 / 提取规则 / 角色锚点各自多套预设
- *  · 分层提取：镜头/环境/氛围/人物/动作，各一框一锁，可只重摇一层，环境/氛围跨楼沿用
+ *  · 分层提取：镜头/环境/氛围/人物/服装/动作（六层），各一框一锁，可只重摇一层，环境/氛围/服装跨楼沿用
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.27";
+    const VERSION = "1.6.28";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -22,14 +22,14 @@
        ============================================================ */
     const DEFAULT_TEMPLATE = "image###{Description}###";
     const ALT_TEMPLATE = "<draw>{Description}</draw>";
-    const TPL_PH_RE = /\{(?:Description|Camera|Env|Mood|Chars|Pose)\}/g;
+    const TPL_PH_RE = /\{(?:Description|Camera|Env|Mood|Chars|Outfit|Pose)\}/g;
 
     /* —— 分层提取 —— */
-    const LAYERS = ["camera", "env", "mood", "chars", "pose"];
-    const LAYER_LABEL = { camera: "镜头", env: "环境", mood: "氛围", chars: "人物", pose: "动作" };
-    const LAYER_ICON = { camera: "📷", env: "🌆", mood: "🎞️", chars: "🧍", pose: "🤝" };
-    const LAYER_PH = { camera: "{Camera}", env: "{Env}", mood: "{Mood}", chars: "{Chars}", pose: "{Pose}" };
-    const LAYER_INHERIT = { env: true, mood: true };   // 副AI回 NO_CHANGE 时沿用上一楼的层
+    const LAYERS = ["camera", "env", "mood", "chars", "outfit", "pose"];
+    const LAYER_LABEL = { camera: "镜头", env: "环境", mood: "氛围", chars: "人物", outfit: "服装", pose: "动作" };
+    const LAYER_ICON = { camera: "📷", env: "🌆", mood: "🎞️", chars: "🧍", outfit: "👗", pose: "🤝" };
+    const LAYER_PH = { camera: "{Camera}", env: "{Env}", mood: "{Mood}", chars: "{Chars}", outfit: "{Outfit}", pose: "{Pose}" };
+    const LAYER_INHERIT = { env: true, mood: true, outfit: true };   // 副AI回 NO_CHANGE 时沿用上一楼的层
     const NOCHANGE = "NO_CHANGE";
 
     const DEFAULT_SYS_EMO = "You extract concise visual image-generation descriptions from Chinese roleplay text. Focus on visible emotion, relationship tension, micro-expressions, body language, atmosphere, lighting, and cinematic mood. Output only the final English Description. Do not think aloud. Do not explain.";
@@ -465,11 +465,12 @@
     /* 给副AI的分层合同：五个标签 + 锁定层 + 可沿用层 */
     function layerContract(prev, locks) {
         const lines = [
-            "任务：把正文拆成五层英文生图描述，按下面五个标签分节输出。标签外不要写任何东西；不要解释；不要标题；不要代码块；不要中文。",
+            "任务：把正文拆成六层英文生图描述，按下面六个标签分节输出。标签外不要写任何东西；不要解释；不要标题；不要代码块；不要中文。",
             "<camera>景别、机位高度、视角、构图、景深。一到两句。</camera>",
             "<env>只写物理空间：地点、室内外、时间段、天气、关键背景与道具、背景人物的数量与动态。不写光线质感和情绪。两到三句。</env>",
             "<mood>这一楼的画面感觉，用画面载体写而不是堆形容词：光的方向与质地、色温、明暗对比、空气感（清透 / 潮湿 / 尘光）、天气细节、整体基调。一到三句。</mood>",
-            "<chars>只写本楼实际出场且入镜的角色：按角色锚点校准外貌，再写此刻的服装状态、表情、身体状态（受伤、湿发、绷带等）。</chars>",
+            "<chars>只写本楼实际出场且入镜的角色：按角色锚点校准外貌，再写此刻的表情与情绪状态。</chars>",
+            "<outfit>只写服装与发型的当前状态：每位出场角色此刻穿什么、发型如何；基础着装按角色锚点校准。两三句以内。</outfit>",
             "<pose>动作与空间关系，写成明确的空间句：谁在哪、面朝哪、视线落在哪、手放在哪、身体接触点、相对位置与距离。</pose>"
         ];
         const lockLines = [];
@@ -488,13 +489,19 @@
             lines.push(prev.env);
             lines.push("本楼地点、时间段、天气、道具都没变时，<env> 里只写 " + NOCHANGE + "，其余层照常输出。换了场景才重写环境。");
         }
-        if (prev && String(prev.mood || "").trim() && !(locks && locks.mood)) {
-            lines.push("");
-            lines.push("【上一楼的氛围层】");
-            lines.push(prev.mood);
-            lines.push("本楼光线、色温、情绪基调都没变时，<mood> 里只写 " + NOCHANGE + "。情绪转折、光线变化就重写。");
-        }
-        return lines.join("\n");
+    if (prev && String(prev.mood || "").trim() && !(locks && locks.mood)) {
+        lines.push("");
+        lines.push("【上一楼的氛围层】");
+        lines.push(prev.mood);
+        lines.push("本楼光线、色温、情绪基调都没变时，<mood> 里只写 " + NOCHANGE + "。情绪转折、光线变化就重写。");
+    }
+    if (prev && String(prev.outfit || "").trim() && !(locks && locks.outfit)) {
+        lines.push("");
+        lines.push("【上一楼的服装层】");
+        lines.push(prev.outfit);
+        lines.push("本楼没人换装、发型没变时，<outfit> 里只写 " + NOCHANGE + "，其余层照常输出。有换装或发型变化才重写。");
+    }
+    return lines.join("\n");
     }
     /* 副AI回复 → 各层；一个标签都没有就返回 null（整段兜底） */
     function parseLayers(txt) {
@@ -1155,6 +1162,14 @@
         return canvas.toDataURL("image/jpeg", 0.95);
     }
 
+    function sizeHint() {
+        const m = String(cfg().grokSize || "").match(/^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i);
+        if (!m) return "";
+        const w = +m[1], h = +m[2];
+        if (!w || !h || w === h) return "";
+        return h > w ? "\n\n构图要求：竖版 portrait 画面，宽高比约 " + w + ":" + h + "。" : "\n\n构图要求：横版 landscape 画面，宽高比约 " + w + ":" + h + "。";
+    }
+
     /* —— 编辑接口：/images/edits（各站形状不一：new-api 只认 multipart、别家只认 JSON——四种形状全试，报错全汇总）—— */
     async function genEdits(finalPrompt, faceRef) {
         const c = cfg();
@@ -1164,7 +1179,7 @@
         if (/\/generations$/.test(base)) base = base.replace(/\/generations$/, "");
         if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
         const url = base + "/images/edits";
-        const prompt = finalPrompt + "\n\n（输入图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）";
+        const prompt = finalPrompt + sizeHint() + "\n\n（输入图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）";
         const rawB64 = String(faceRef).replace(/^data:[^,]+,/, "");
         const size = String(c.grokSize || "1024x1024");
         const signal = genAbort ? genAbort.signal : undefined;
@@ -1229,6 +1244,7 @@
     /* —— 生图：中转站 chat/completions 多模态 —— */
     async function genGemini(finalPrompt) {
         const c = cfg();
+        finalPrompt = String(finalPrompt || "") + sizeHint();
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
         if (!base) throw new Error("请先填写生图 API 地址");
         if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
@@ -2200,7 +2216,7 @@
                         '</div>' +
                         '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
                         '<div id="sdg-layers"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
-                            '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围场景没换时自动沿用上一楼；↻ 只重摇这一层</div>' +
+                            '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围 / 服装没变化时自动沿用上一楼；↻ 只重摇这一层</div>' +
                             layerRowsHTML() +
                         '</div>' +
                     '</div>' +
@@ -2225,7 +2241,7 @@
                     presetRowHTML("anchors", "角色锚点预设") +
                     field("角色锚点", textArea("sdg-anchors", "extAnchors", 3, "角色名：外貌描述……")) +
                     field("注入模板", textArea("sdg-template", "template", 2, DEFAULT_TEMPLATE)) +
-                    '<div class="sdg-hint">默认 image###{Description}###　分层可用 {Camera} {Env} {Mood} {Chars} {Pose}</div>' +
+                    '<div class="sdg-hint">默认 image###{Description}###　分层可用 {Camera} {Env} {Mood} {Chars} {Outfit} {Pose}</div>' +
                     chk("sdg-ext-proxy", "extProxy", "走酒馆后端代理") +
                     chk("sdg-retry", "retryOnce", "自动提取失败 10 秒后重试一次") +
                     field("超时（秒，0 = 不限）", textInput("sdg-timeout", "requestTimeout", "", "number")) +
