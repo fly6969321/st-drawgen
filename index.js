@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.29";
+    const VERSION = "1.6.30";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -78,7 +78,6 @@
         rulesJson: "", rulesId: "",      // 提取规则预设
         anchorsJson: "", anchorsId: "",  // 角色锚点预设
         grokSize: "1024x1024",
-        sizeToPrompt: false,            // 尺寸写进提示词：站子不认 size 参数时用它控制横竖版
         faceRef: "", faceRefOn: false, faceRefMode: "chat",   // 脸部参考图（data URL）+ 锁脸开关 + 发送方式（chat=聊天多模态 / edits=/images/edits 编辑接口）
         genProxy: false,
         genTimeout: 300,
@@ -1163,15 +1162,6 @@
         return canvas.toDataURL("image/jpeg", 0.95);
     }
 
-    function sizeHint() {
-        if (!cfg().sizeToPrompt) return "";
-        const m = String(cfg().grokSize || "").match(/^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i);
-        if (!m) return "";
-        const w = +m[1], h = +m[2];
-        if (!w || !h || w === h) return "";
-        return h > w ? "\n\n构图要求：竖版 portrait 画面，宽高比约 " + w + ":" + h + "。" : "\n\n构图要求：横版 landscape 画面，宽高比约 " + w + ":" + h + "。";
-    }
-
     /* —— 编辑接口：/images/edits（各站形状不一：new-api 只认 multipart、别家只认 JSON——四种形状全试，报错全汇总）—— */
     async function genEdits(finalPrompt, faceRef) {
         const c = cfg();
@@ -2177,7 +2167,6 @@
                     field("API Key", textInput("sdg-gen-key", "genKey", "", "password")) +
                     modelRowHTML("gen") +
                     field("尺寸", textInput("sdg-grok-size", "grokSize", "1024x1024")) +
-                    chk("sdg-size-to-prompt", "sizeToPrompt", "尺寸写进提示词（站子不认 size 参数时用它控制横竖版）") +
                     field("脸部参考图", '<button type="button" id="sdg-face-pick" class="sdg-minibtn" style="width:100%;padding:8px 0;font-size:13px">📁 选择 / 更换参考图</button>' +
                         '<input type="file" id="sdg-face-file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px">' +
                         '<img id="sdg-face-thumb" alt=""' + (cfg().faceRef ? ' src="' + cfg().faceRef + '" style="display:block !important;height:110px !important;width:auto !important;max-width:100% !important;margin:5px 0 0 0 !important;border-radius:6px !important"' : ' style="display:none !important"') + '>' +
@@ -2345,7 +2334,6 @@
         bindChk("#sdg-gen-proxy", "genProxy");
         bindChk("#sdg-jpeg", "convertToJpeg");
         bindChk("#sdg-face-on", "faceRefOn");
-        bindChk("#sdg-size-to-prompt", "sizeToPrompt");
         const faceMode = q("#sdg-face-mode");
         if (faceMode) faceMode.addEventListener("change", function () { save("faceRefMode", faceMode.value); });
         const faceFile = q("#sdg-face-file");
