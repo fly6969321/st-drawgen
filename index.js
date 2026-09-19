@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.30";
+    const VERSION = "1.6.31";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1171,7 +1171,7 @@
         if (/\/generations$/.test(base)) base = base.replace(/\/generations$/, "");
         if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
         const url = base + "/images/edits";
-        const prompt = finalPrompt + sizeHint() + "\n\n（输入图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）";
+        const prompt = finalPrompt + "\n\n（输入图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）";
         const rawB64 = String(faceRef).replace(/^data:[^,]+,/, "");
         const size = String(c.grokSize || "1024x1024");
         const signal = genAbort ? genAbort.signal : undefined;
@@ -1236,7 +1236,6 @@
     /* —— 生图：中转站 chat/completions 多模态 —— */
     async function genGemini(finalPrompt) {
         const c = cfg();
-        finalPrompt = String(finalPrompt || "") + sizeHint();
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
         if (!base) throw new Error("请先填写生图 API 地址");
         if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
