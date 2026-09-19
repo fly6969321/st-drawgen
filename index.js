@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.24";
+    const VERSION = "1.6.25";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -78,7 +78,7 @@
         rulesJson: "", rulesId: "",      // 提取规则预设
         anchorsJson: "", anchorsId: "",  // 角色锚点预设
         grokSize: "1024x1024",
-        faceRef: "", faceRefOn: false,   // 脸部参考图（压缩后的 data URL）+ 锁脸开关：生成时附图保持面部一致
+        faceRef: "", faceRefOn: false, faceRefMode: "chat",   // 脸部参考图（data URL）+ 锁脸开关 + 发送方式（chat=聊天多模态 / edits=/images/edits 编辑接口）
         genProxy: false,
         genTimeout: 300,
         convertToJpeg: false,
@@ -1155,6 +1155,42 @@
         return canvas.toDataURL("image/jpeg", 0.95);
     }
 
+    /* —— 编辑接口：/images/edits（多部分表单，Grok 编辑模型 / gpt-image-1 系用）—— */
+    async function genEdits(finalPrompt, faceRef) {
+        const c = cfg();
+        let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
+        if (!base) throw new Error("请先填写生图 API 地址");
+        if (/\/edits$/.test(base)) base = base.replace(/\/edits$/, "");
+        if (/\/generations$/.test(base)) base = base.replace(/\/generations$/, "");
+        if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
+        const url = base + "/images/edits";
+        const blob = await (await fetch(faceRef)).blob();
+        const fd = new FormData();
+        fd.append("model", c.genModel);
+        fd.append("prompt", finalPrompt + "\n\n（输入图是人物面部参考：严格保持其脸部特征、发型与身份一致，不要改变长相。）");
+        fd.append("image", blob, "face.jpg");
+        fd.append("n", "1");
+        fd.append("size", String(c.grokSize || "1024x1024"));
+        log("编辑接口请求:", url);
+        const signal = genAbort ? genAbort.signal : undefined;
+        const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Authorization": "Bearer " + (c.genKey || "") },
+            body: fd,
+            signal
+        });
+        if (!resp.ok) {
+            const errorText = await resp.text();
+            throw new Error("编辑接口请求失败 (" + resp.status + "): " + errorText.slice(0, 300));
+        }
+        const result = await resp.json();
+        const item = result && result.data && result.data[0];
+        if (!item) throw new Error("编辑接口响应缺少 data[0]，原始响应: " + JSON.stringify(result).slice(0, 500));
+        if (item.b64_json) return "data:image/png;base64," + item.b64_json;
+        if (item.url) return await dataUrlFromUrl(item.url);
+        throw new Error("编辑接口响应未包含图片（b64_json/url 均为空）");
+    }
+
     /* —— 生图：中转站 chat/completions 多模态 —— */
     async function genGemini(finalPrompt) {
         const c = cfg();
@@ -1242,7 +1278,8 @@
 
         if (typeof AbortController !== "undefined") genAbort = new AbortController();
         try {
-            let imageUrl = await genGemini(finalPrompt);
+            const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
+            let imageUrl = (faceRef && String(cfg().faceRefMode) === "edits") ? await genEdits(finalPrompt, faceRef) : await genGemini(finalPrompt);
             if ((c.convertToJpeg === true || String(c.convertToJpeg) === "true") && String(imageUrl).startsWith("data:image/")) {
                 try { imageUrl = await convertImageToJpeg(imageUrl); } catch (eJ) { log("转 JPEG 失败，保留原图:", eJ.message); }
             }
@@ -2093,6 +2130,10 @@
                         '<button type="button" id="sdg-face-clear" class="sdg-minibtn" style="margin-top:5px' + (cfg().faceRef ? "" : ";display:none") + '">🗑 清除参考图</button>' +
                         '<div class="sdg-hint" id="sdg-face-note">' + (cfg().faceRef ? '已存参考图 ✓ 勾选下方「锁脸」后生效' : '未设置（可选）：点上面按钮选一张正脸清晰的图') + '</div>') +
                     chk("sdg-face-on", "faceRefOn", "锁脸：生成时附上参考图保持面部一致") +
+                    field("锁脸发送方式", '<select id="sdg-face-mode">' +
+                        '<option value="chat"' + (cfg().faceRefMode !== "edits" ? " selected" : "") + '>聊天多模态（默认，Gemini / GPT 系）</option>' +
+                        '<option value="edits"' + (cfg().faceRefMode === "edits" ? " selected" : "") + '>编辑接口（/images/edits，Grok 编辑模型等）</option>' +
+                    '</select>') +
                     chk("sdg-gen-proxy", "genProxy", "Gemini 走酒馆后端代理") +
                     chk("sdg-jpeg", "convertToJpeg", "入库前转 JPEG") +
 
@@ -2250,6 +2291,8 @@
         bindChk("#sdg-gen-proxy", "genProxy");
         bindChk("#sdg-jpeg", "convertToJpeg");
         bindChk("#sdg-face-on", "faceRefOn");
+        const faceMode = q("#sdg-face-mode");
+        if (faceMode) faceMode.addEventListener("change", function () { save("faceRefMode", faceMode.value); });
         const faceFile = q("#sdg-face-file");
         const facePick = q("#sdg-face-pick");
         if (facePick && faceFile) facePick.addEventListener("click", function () { faceFile.click(); });
