@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.26";
+    const VERSION = "1.6.27";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1155,7 +1155,7 @@
         return canvas.toDataURL("image/jpeg", 0.95);
     }
 
-    /* —— 编辑接口：/images/edits（各站形状不一：multipart 表单 / JSON+dataURL / JSON+裸base64，自动依次试）—— */
+    /* —— 编辑接口：/images/edits（各站形状不一：new-api 只认 multipart、别家只认 JSON——四种形状全试，报错全汇总）—— */
     async function genEdits(finalPrompt, faceRef) {
         const c = cfg();
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
@@ -1164,54 +1164,66 @@
         if (/\/generations$/.test(base)) base = base.replace(/\/generations$/, "");
         if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
         const url = base + "/images/edits";
-        const prompt = finalPrompt + "\n\n（输入图是人物面部参考：严格保持其脸部特征、发型与身份一致，不要改变长相。）";
+        const prompt = finalPrompt + "\n\n（输入图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）";
         const rawB64 = String(faceRef).replace(/^data:[^,]+,/, "");
         const size = String(c.grokSize || "1024x1024");
         const signal = genAbort ? genAbort.signal : undefined;
+        const errs = [];
         async function parseResp(resp, tag) {
             const text = await resp.text();
-            if (!resp.ok) throw new Error("编辑接口(" + tag + ") " + resp.status + ": " + text.slice(0, 260));
+            if (!resp.ok) throw new Error(tag + " " + resp.status + ": " + text.slice(0, 150));
             let result;
-            try { result = JSON.parse(text); } catch (e) { throw new Error("编辑接口(" + tag + ")响应不是 JSON: " + text.slice(0, 200)); }
+            try { result = JSON.parse(text); } catch (e) { throw new Error(tag + " 响应不是 JSON: " + text.slice(0, 120)); }
             const item = result && result.data && result.data[0];
-            if (!item) throw new Error("编辑接口(" + tag + ")响应缺少 data[0]: " + text.slice(0, 260));
+            if (!item) throw new Error(tag + " 响应缺少 data[0]: " + text.slice(0, 150));
             if (item.b64_json) return "data:image/png;base64," + item.b64_json;
             if (item.url) return await dataUrlFromUrl(item.url);
-            throw new Error("编辑接口(" + tag + ")响应未包含图片");
+            throw new Error(tag + " 响应未包含图片");
         }
-        let lastErr = null;
-        try {   // ① multipart 表单（OpenAI 官方形状）
-            const blob = await (await fetch(faceRef)).blob();
+        function multipartBody(pngDataUrl, mime, filename) {
+            const bin = atob(pngDataUrl.split(",")[1]);
+            const buf = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+            const file = new File([buf], filename, { type: mime });
             const fd = new FormData();
             fd.append("model", c.genModel);
             fd.append("prompt", prompt);
-            fd.append("image", blob, "face.jpg");
+            fd.append("image", file);
             fd.append("n", "1");
             fd.append("size", size);
-            return await parseResp(await fetch(url, { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: fd, signal }), "表单");
-        } catch (e) {
-            if (e.name === "AbortError") throw e;
-            lastErr = e;
-            if (!/415|application\/json|multipart|form/i.test(String(e.message))) throw e;
-            log("编辑接口表单形状被拒，转 JSON:", String(e.message).slice(0, 150));
+            return fd;
         }
-        try {   // ② JSON + dataURL
-            return await parseResp(await fetch(url, {
-                method: "POST",
-                headers: directHeaders("application/json", "Bearer " + (c.genKey || "")),
-                body: JSON.stringify({ model: c.genModel, prompt: prompt, image: faceRef, n: 1, size: size }),
-                signal
-            }), "JSON/dataURL");
-        } catch (e) { if (e.name === "AbortError") throw e; lastErr = e; }
-        try {   // ③ JSON + 裸 base64
-            return await parseResp(await fetch(url, {
-                method: "POST",
-                headers: directHeaders("application/json", "Bearer " + (c.genKey || "")),
-                body: JSON.stringify({ model: c.genModel, prompt: prompt, image: rawB64, n: 1, size: size }),
-                signal
-            }), "JSON/base64");
-        } catch (e) { if (e.name === "AbortError") throw e; lastErr = e; }
-        throw lastErr || new Error("编辑接口请求失败");
+        const toPng = function (dataUrl) {
+            return new Promise(function (res) {
+                const im = new Image();
+                im.onload = function () {
+                    const cv = document.createElement("canvas");
+                    cv.width = im.width; cv.height = im.height;
+                    cv.getContext("2d").drawImage(im, 0, 0);
+                    res(cv.toDataURL("image/png"));
+                };
+                im.onerror = function () { res(dataUrl); };
+                im.src = dataUrl;
+            });
+        };
+        const pngRef = await toPng(faceRef);
+        const attempts = [
+            ["multipart-PNG", { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: multipartBody(pngRef, "image/png", "face.png"), signal }],
+            ["multipart-JPEG", { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: multipartBody(faceRef, "image/jpeg", "face.jpg"), signal }],
+            ["JSON/dataURL", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify({ model: c.genModel, prompt: prompt, image: faceRef, n: 1, size: size }), signal }],
+            ["JSON/base64", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify({ model: c.genModel, prompt: prompt, image: rawB64, n: 1, size: size }), signal }]
+        ];
+        for (let i = 0; i < attempts.length; i++) {
+            const tag = attempts[i][0];
+            try {
+                return await parseResp(await fetch(url, attempts[i][1]), tag);
+            } catch (e) {
+                if (e.name === "AbortError") throw e;
+                errs.push("[" + tag + "] " + String(e.message || e).slice(0, 110));
+                log("编辑接口形状 " + tag + " 失败:", String(e.message || e).slice(0, 200));
+            }
+        }
+        throw new Error("编辑接口四种形状均失败 → " + errs.join(" ｜ "));
     }
 
     /* —— 生图：中转站 chat/completions 多模态 —— */
@@ -1225,7 +1237,7 @@
         const parts = [];
         if (faceRef) parts.push({ type: "image_url", image_url: { url: faceRef } });
         parts.push({ type: "text", text: faceRef
-            ? finalPrompt + "\n\n（第一张图是人物面部参考：生成时严格保持参考图中人物的脸部特征、发型与身份一致，不要改变长相。）"
+            ? finalPrompt + "\n\n（第一张图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）"
             : finalPrompt });
         const messages = [{ role: "user", content: parts }];
         const payload = { model: c.genModel, messages: messages, size: String(c.grokSize || "1024x1024") };
