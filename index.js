@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.22";
+    const VERSION = "1.6.23";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2087,10 +2087,11 @@
                     field("API Key", textInput("sdg-gen-key", "genKey", "", "password")) +
                     modelRowHTML("gen") +
                     field("尺寸", textInput("sdg-grok-size", "grokSize", "1024x1024")) +
-                    field("脸部参考图", '<div class="sdg-siterow">' +
-                        '<input type="file" id="sdg-face-file" accept="image/*" style="min-width:0;flex:1">' +
-                        '<button type="button" id="sdg-face-clear" class="sdg-minibtn" title="清除参考图">🗑</button>' +
-                    '</div><div class="sdg-hint" id="sdg-face-note">' + (cfg().faceRef ? '已存参考图 ✓' : '未设置（可选）') + '</div>') +
+                    field("脸部参考图", '<button type="button" id="sdg-face-pick" class="sdg-minibtn" style="width:100%;padding:8px 0;font-size:13px">📁 选择 / 更换参考图</button>' +
+                        '<input type="file" id="sdg-face-file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px">' +
+                        '<img id="sdg-face-thumb" alt=""' + (cfg().faceRef ? ' src="' + cfg().faceRef + '" style="display:block;max-width:100%;max-height:90px;margin-top:5px;border-radius:6px"' : ' style="display:none"') + '>' +
+                        '<button type="button" id="sdg-face-clear" class="sdg-minibtn" style="margin-top:5px' + (cfg().faceRef ? "" : ";display:none") + '">🗑 清除参考图</button>' +
+                        '<div class="sdg-hint" id="sdg-face-note">' + (cfg().faceRef ? '已存参考图 ✓ 勾选下方「锁脸」后生效' : '未设置（可选）：点上面按钮选一张正脸清晰的图') + '</div>') +
                     chk("sdg-face-on", "faceRefOn", "锁脸：生成时附上参考图保持面部一致") +
                     chk("sdg-gen-proxy", "genProxy", "Gemini 走酒馆后端代理") +
                     chk("sdg-jpeg", "convertToJpeg", "入库前转 JPEG") +
@@ -2250,6 +2251,8 @@
         bindChk("#sdg-jpeg", "convertToJpeg");
         bindChk("#sdg-face-on", "faceRefOn");
         const faceFile = q("#sdg-face-file");
+        const facePick = q("#sdg-face-pick");
+        if (facePick && faceFile) facePick.addEventListener("click", function () { faceFile.click(); });
         if (faceFile) faceFile.addEventListener("change", function () {
             const f = faceFile.files && faceFile.files[0];
             if (!f) return;
@@ -2263,8 +2266,11 @@
                     cv.width = Math.round(img.width * scale);
                     cv.height = Math.round(img.height * scale);
                     cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
-                    save("faceRef", cv.toDataURL("image/jpeg", 0.85));
-                    const note = q("#sdg-face-note"); if (note) note.textContent = "已存参考图 ✓（" + cv.width + "×" + cv.height + "）";
+                    const dataUrl = cv.toDataURL("image/jpeg", 0.85);
+                    save("faceRef", dataUrl);
+                    const th = q("#sdg-face-thumb"); if (th) { th.src = dataUrl; th.style.display = "block"; }
+                    const fc = q("#sdg-face-clear"); if (fc) fc.style.display = "";
+                    const note = q("#sdg-face-note"); if (note) note.textContent = "已存参考图 ✓（" + cv.width + "×" + cv.height + "）勾选下方「锁脸」后生效";
                 };
                 img.onerror = function () { setStatus("参考图读取失败", C_ERR); };
                 img.src = String(reader.result);
@@ -2275,7 +2281,9 @@
         if (faceClear) faceClear.addEventListener("click", function () {
             save("faceRef", "");
             if (faceFile) faceFile.value = "";
-            const note = q("#sdg-face-note"); if (note) note.textContent = "未设置（可选）";
+            const th = q("#sdg-face-thumb"); if (th) { th.removeAttribute("src"); th.style.display = "none"; }
+            faceClear.style.display = "none";
+            const note = q("#sdg-face-note"); if (note) note.textContent = "未设置（可选）：点上面按钮选一张正脸清晰的图";
         });
 
         /* 自动化 */
