@@ -2,7 +2,7 @@
  *  生图工坊 · DrawGen v1.6.0
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
- *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → Grok/Gemini 生图 → 标记原位换成图片
+ *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
  *
  *  · 楼层正文里每一个 image###…### 标记原位换成图片，一楼几个标记几张图；
  *    没图的标记显示「生成图片」按钮，出图后是折叠条，重画保留历史可翻页
@@ -72,7 +72,6 @@
         autoDelay: 1800,
         hideTagText: true,          // 出图后标记文字不显示（标记原位换成图）
         // —— 生图 ——
-        genProvider: "gemini",
         genEndpoint: "", genKey: "", genModel: "",
         genFixedPrompt: "", genPostfixPrompt: "",
         stylesJson: "", styleId: "",     // 画风预设（可存多个随时切）
@@ -188,12 +187,12 @@
 
     /* ============================================================
        多站点（提取 / 生图各一套，可存多个随意切换）
-       每个站点 = { id, name, endpoint, key, model, models[], provider, size }
+       每个站点 = { id, name, endpoint, key, model, models[], size }
        当前站点的值同时写进老的扁平字段（extEndpoint 等），下游代码不用改
        ============================================================ */
     const PROF_FIELDS = {
         ext: { endpoint: "extEndpoint", key: "extKey", model: "extModel" },
-        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", provider: "genProvider", size: "grokSize" }
+        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize" }
     };
     function profJsonKey(kind) { return kind === "gen" ? "genProfilesJson" : "extProfilesJson"; }
     function profIdKey(kind) { return kind === "gen" ? "genProfileId" : "extProfileId"; }
@@ -255,7 +254,7 @@
         const name = window.prompt("新站点名字", "站点" + (list.length + 1));
         if (name === null) return;
         const p = { id: newId(), name: String(name).trim() || "站点" + (list.length + 1), endpoint: "", key: "", model: "", models: [] };
-        if (kind === "gen") { p.provider = cfg().genProvider || "gemini"; p.size = cfg().grokSize || "1024x1024"; }
+        if (kind === "gen") { p.size = cfg().grokSize || "1024x1024"; }
         list.push(p);
         saveProfiles(kind, list);
         saveCritical(profIdKey(kind), p.id);
@@ -1155,42 +1154,7 @@
         return canvas.toDataURL("image/jpeg", 0.95);
     }
 
-    /* —— Grok：images/generations —— */
-    async function genGrok(finalPrompt) {
-        const c = cfg();
-        let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
-        if (!base) throw new Error("请先填写生图 API 地址");
-        const url = /\/generations$/.test(base) ? base : base + "/images/generations";
-        const payload = {
-            model: c.genModel,
-            prompt: finalPrompt,
-            n: 1,
-            size: String(c.grokSize || "1024x1024"),
-            response_format: "b64_json"
-        };
-        log("Grok 请求:", url);
-        const signal = genAbort ? genAbort.signal : undefined;
-        const resp = await fetch(url, {
-            method: "POST",
-            headers: directHeaders("application/json", "Bearer " + (c.genKey || "")),
-            body: JSON.stringify(payload),
-            signal
-        });
-        if (!resp.ok) {
-            const errorText = await resp.text();
-            throw new Error("Grok API request failed (" + resp.status + "): " + errorText);
-        }
-        const result = await resp.json();
-        const item = result && result.data && result.data[0];
-        if (!item) throw new Error("Grok 响应缺少 data[0]，原始响应: " + JSON.stringify(result).slice(0, 500));
-        let imageUrl = "";
-        if (item.b64_json) imageUrl = "data:image/png;base64," + item.b64_json;
-        else if (item.url) imageUrl = await dataUrlFromUrl(item.url);
-        if (!imageUrl) throw new Error("Grok 响应未包含图片（b64_json/url 均为空）");
-        return imageUrl;
-    }
-
-    /* —— Gemini：chat/completions 多模态 —— */
+    /* —— 生图：中转站 chat/completions 多模态 —— */
     async function genGemini(finalPrompt) {
         const c = cfg();
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
@@ -1271,7 +1235,7 @@
 
         if (typeof AbortController !== "undefined") genAbort = new AbortController();
         try {
-            let imageUrl = c.genProvider === "grok" ? await genGrok(finalPrompt) : await genGemini(finalPrompt);
+            let imageUrl = await genGemini(finalPrompt);
             if ((c.convertToJpeg === true || String(c.convertToJpeg) === "true") && String(imageUrl).startsWith("data:image/")) {
                 try { imageUrl = await convertImageToJpeg(imageUrl); } catch (eJ) { log("转 JPEG 失败，保留原图:", eJ.message); }
             }
@@ -1650,7 +1614,7 @@
         if (genBusy[key]) { setStatus("这张正在生图中", C_WARN); return ""; }
         genBusy[key] = true;
         if (msg) renderFloorImage(idx);
-        setStatus("正在生图（" + (cfg().genProvider === "grok" ? "Grok" : "Gemini") + "）…", C_OK);
+        setStatus("正在生图…", C_OK);
         const t0 = Date.now();
         try {
             const { image } = await generateImage(desc);
@@ -2089,7 +2053,6 @@
     function panelHTML() {
         const sysList = getSystemPrompts();
         const sysOpts = sysList.map(p => '<option value="' + esc(p.id) + '"' + (p.id === cfg().extActiveSystemPrompt ? " selected" : "") + '>' + esc(p.name) + '</option>').join("");
-        const prov = cfg().genProvider;
         return '' +
         '<div id="sdg-panel-head">' +
             '<span class="sdg-title">🎨 生图工坊 <small>v' + VERSION + '</small></span>' +
@@ -2113,10 +2076,6 @@
                 /* ========== 生图页 ========== */
                 '<section class="sdg-pane" id="sdg-pane-gen">' +
                     siteRowHTML("gen") +
-                    field("渠道", '<select id="sdg-gen-provider">' +
-                        '<option value="gemini"' + (prov === "gemini" ? " selected" : "") + '>Gemini</option>' +
-                        '<option value="grok"' + (prov === "grok" ? " selected" : "") + '>Grok</option>' +
-                    '</select>') +
                     field("API 地址", textInput("sdg-gen-endpoint", "genEndpoint", "https://api.xxx.com/v1")) +
                     field("API Key", textInput("sdg-gen-key", "genKey", "", "password")) +
                     modelRowHTML("gen") +
@@ -2274,7 +2233,6 @@
         };
 
         /* 生图设置 */
-        q("#sdg-gen-provider").addEventListener("change", function (ev) { saveProfileField("gen", "provider", ev.target.value); });
         bindSite("gen");
         bindChk("#sdg-gen-proxy", "genProxy");
         bindChk("#sdg-jpeg", "convertToJpeg");
@@ -2393,7 +2351,6 @@
         const kk = q(pre + "-key"); if (kk) kk.value = c[kind === "gen" ? "genKey" : "extKey"] || "";
         const mi = q(pre + "-model"); if (mi) mi.value = c[kind === "gen" ? "genModel" : "extModel"] || "";
         if (kind === "gen") {
-            const pv = q("#sdg-gen-provider"); if (pv) pv.value = c.genProvider || "gemini";
             const sz = q("#sdg-grok-size"); if (sz) sz.value = c.grokSize || "1024x1024";
         }
         renderModelSelect(kind);
