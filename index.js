@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.25";
+    const VERSION = "1.6.26";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1155,7 +1155,7 @@
         return canvas.toDataURL("image/jpeg", 0.95);
     }
 
-    /* —— 编辑接口：/images/edits（多部分表单，Grok 编辑模型 / gpt-image-1 系用）—— */
+    /* —— 编辑接口：/images/edits（各站形状不一：multipart 表单 / JSON+dataURL / JSON+裸base64，自动依次试）—— */
     async function genEdits(finalPrompt, faceRef) {
         const c = cfg();
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
@@ -1164,31 +1164,54 @@
         if (/\/generations$/.test(base)) base = base.replace(/\/generations$/, "");
         if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
         const url = base + "/images/edits";
-        const blob = await (await fetch(faceRef)).blob();
-        const fd = new FormData();
-        fd.append("model", c.genModel);
-        fd.append("prompt", finalPrompt + "\n\n（输入图是人物面部参考：严格保持其脸部特征、发型与身份一致，不要改变长相。）");
-        fd.append("image", blob, "face.jpg");
-        fd.append("n", "1");
-        fd.append("size", String(c.grokSize || "1024x1024"));
-        log("编辑接口请求:", url);
+        const prompt = finalPrompt + "\n\n（输入图是人物面部参考：严格保持其脸部特征、发型与身份一致，不要改变长相。）";
+        const rawB64 = String(faceRef).replace(/^data:[^,]+,/, "");
+        const size = String(c.grokSize || "1024x1024");
         const signal = genAbort ? genAbort.signal : undefined;
-        const resp = await fetch(url, {
-            method: "POST",
-            headers: { "Authorization": "Bearer " + (c.genKey || "") },
-            body: fd,
-            signal
-        });
-        if (!resp.ok) {
-            const errorText = await resp.text();
-            throw new Error("编辑接口请求失败 (" + resp.status + "): " + errorText.slice(0, 300));
+        async function parseResp(resp, tag) {
+            const text = await resp.text();
+            if (!resp.ok) throw new Error("编辑接口(" + tag + ") " + resp.status + ": " + text.slice(0, 260));
+            let result;
+            try { result = JSON.parse(text); } catch (e) { throw new Error("编辑接口(" + tag + ")响应不是 JSON: " + text.slice(0, 200)); }
+            const item = result && result.data && result.data[0];
+            if (!item) throw new Error("编辑接口(" + tag + ")响应缺少 data[0]: " + text.slice(0, 260));
+            if (item.b64_json) return "data:image/png;base64," + item.b64_json;
+            if (item.url) return await dataUrlFromUrl(item.url);
+            throw new Error("编辑接口(" + tag + ")响应未包含图片");
         }
-        const result = await resp.json();
-        const item = result && result.data && result.data[0];
-        if (!item) throw new Error("编辑接口响应缺少 data[0]，原始响应: " + JSON.stringify(result).slice(0, 500));
-        if (item.b64_json) return "data:image/png;base64," + item.b64_json;
-        if (item.url) return await dataUrlFromUrl(item.url);
-        throw new Error("编辑接口响应未包含图片（b64_json/url 均为空）");
+        let lastErr = null;
+        try {   // ① multipart 表单（OpenAI 官方形状）
+            const blob = await (await fetch(faceRef)).blob();
+            const fd = new FormData();
+            fd.append("model", c.genModel);
+            fd.append("prompt", prompt);
+            fd.append("image", blob, "face.jpg");
+            fd.append("n", "1");
+            fd.append("size", size);
+            return await parseResp(await fetch(url, { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: fd, signal }), "表单");
+        } catch (e) {
+            if (e.name === "AbortError") throw e;
+            lastErr = e;
+            if (!/415|application\/json|multipart|form/i.test(String(e.message))) throw e;
+            log("编辑接口表单形状被拒，转 JSON:", String(e.message).slice(0, 150));
+        }
+        try {   // ② JSON + dataURL
+            return await parseResp(await fetch(url, {
+                method: "POST",
+                headers: directHeaders("application/json", "Bearer " + (c.genKey || "")),
+                body: JSON.stringify({ model: c.genModel, prompt: prompt, image: faceRef, n: 1, size: size }),
+                signal
+            }), "JSON/dataURL");
+        } catch (e) { if (e.name === "AbortError") throw e; lastErr = e; }
+        try {   // ③ JSON + 裸 base64
+            return await parseResp(await fetch(url, {
+                method: "POST",
+                headers: directHeaders("application/json", "Bearer " + (c.genKey || "")),
+                body: JSON.stringify({ model: c.genModel, prompt: prompt, image: rawB64, n: 1, size: size }),
+                signal
+            }), "JSON/base64");
+        } catch (e) { if (e.name === "AbortError") throw e; lastErr = e; }
+        throw lastErr || new Error("编辑接口请求失败");
     }
 
     /* —— 生图：中转站 chat/completions 多模态 —— */
