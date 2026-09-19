@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.20";
+    const VERSION = "1.6.22";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -78,6 +78,7 @@
         rulesJson: "", rulesId: "",      // 提取规则预设
         anchorsJson: "", anchorsId: "",  // 角色锚点预设
         grokSize: "1024x1024",
+        faceRef: "", faceRefOn: false,   // 脸部参考图（压缩后的 data URL）+ 锁脸开关：生成时附图保持面部一致
         genProxy: false,
         genTimeout: 300,
         convertToJpeg: false,
@@ -1161,7 +1162,13 @@
         if (!base) throw new Error("请先填写生图 API 地址");
         if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
         const url = base + "/chat/completions";
-        const messages = [{ role: "user", content: [{ type: "text", text: finalPrompt }] }];
+        const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
+        const parts = [];
+        if (faceRef) parts.push({ type: "image_url", image_url: { url: faceRef } });
+        parts.push({ type: "text", text: faceRef
+            ? finalPrompt + "\n\n（第一张图是人物面部参考：生成时严格保持参考图中人物的脸部特征、发型与身份一致，不要改变长相。）"
+            : finalPrompt });
+        const messages = [{ role: "user", content: parts }];
         const payload = { model: c.genModel, messages: messages, size: String(c.grokSize || "1024x1024") };
         log("Gemini 请求:", url);
 
@@ -2080,6 +2087,11 @@
                     field("API Key", textInput("sdg-gen-key", "genKey", "", "password")) +
                     modelRowHTML("gen") +
                     field("尺寸", textInput("sdg-grok-size", "grokSize", "1024x1024")) +
+                    field("脸部参考图", '<div class="sdg-siterow">' +
+                        '<input type="file" id="sdg-face-file" accept="image/*" style="min-width:0;flex:1">' +
+                        '<button type="button" id="sdg-face-clear" class="sdg-minibtn" title="清除参考图">🗑</button>' +
+                    '</div><div class="sdg-hint" id="sdg-face-note">' + (cfg().faceRef ? '已存参考图 ✓' : '未设置（可选）') + '</div>') +
+                    chk("sdg-face-on", "faceRefOn", "锁脸：生成时附上参考图保持面部一致") +
                     chk("sdg-gen-proxy", "genProxy", "Gemini 走酒馆后端代理") +
                     chk("sdg-jpeg", "convertToJpeg", "入库前转 JPEG") +
 
@@ -2236,6 +2248,35 @@
         bindSite("gen");
         bindChk("#sdg-gen-proxy", "genProxy");
         bindChk("#sdg-jpeg", "convertToJpeg");
+        bindChk("#sdg-face-on", "faceRefOn");
+        const faceFile = q("#sdg-face-file");
+        if (faceFile) faceFile.addEventListener("change", function () {
+            const f = faceFile.files && faceFile.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = function () {
+                const img = new Image();
+                img.onload = function () {
+                    const maxDim = 768;
+                    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+                    const cv = document.createElement("canvas");
+                    cv.width = Math.round(img.width * scale);
+                    cv.height = Math.round(img.height * scale);
+                    cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+                    save("faceRef", cv.toDataURL("image/jpeg", 0.85));
+                    const note = q("#sdg-face-note"); if (note) note.textContent = "已存参考图 ✓（" + cv.width + "×" + cv.height + "）";
+                };
+                img.onerror = function () { setStatus("参考图读取失败", C_ERR); };
+                img.src = String(reader.result);
+            };
+            reader.readAsDataURL(f);
+        });
+        const faceClear = q("#sdg-face-clear");
+        if (faceClear) faceClear.addEventListener("click", function () {
+            save("faceRef", "");
+            if (faceFile) faceFile.value = "";
+            const note = q("#sdg-face-note"); if (note) note.textContent = "未设置（可选）";
+        });
 
         /* 自动化 */
         bindChk("#sdg-auto-extract", "autoExtract");
