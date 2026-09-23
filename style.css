@@ -471,7 +471,7 @@
     object-fit: contain;
     border-radius: 8px;
     border: 1px solid rgba(128, 128, 128, 0.25);
-    cursor: default;
+    cursor: zoom-in;
     box-shadow: 0 3px 12px rgba(0, 0, 0, 0.22);
 }
 .sdg-img.sdg-orphan { max-width: 100%; margin: 8px 0 4px; }
@@ -674,4 +674,62 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
     #sdg-panel { width: 96vw; left: 2vw !important; top: 2vh !important; max-height: 94vh; }
     #sdg-layers { grid-template-columns: 1fr; }
     .sdg-slot, .sdg-img.sdg-orphan { max-width: 100% !important; }
+}
+
+/* 图片预览独立于楼层限宽/限高；dialog 在原生 top layer，旧 WebView 用固定定位兜底。 */
+#sdg-image-preview[open] {
+    display: flex !important;
+    position: fixed !important;
+    inset: 0 !important;
+    box-sizing: border-box;
+    width: 100% !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-width: none !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 52px 16px 16px !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: rgba(0, 0, 0, 0.9) !important;
+    color: #fff;
+    z-index: 2147483647;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    overscroll-behavior: contain;
+}
+#sdg-image-preview::backdrop { background: rgba(0, 0, 0, 0.85); }
+#sdg-image-preview .sdg-preview-image {
+    display: block;
+    width: auto !important;
+    height: auto !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    min-width: 0;
+    min-height: 0;
+    object-fit: contain !important;
+    border: 0;
+    border-radius: 4px;
+}
+#sdg-image-preview .sdg-preview-image[hidden],
+#sdg-image-preview .sdg-preview-error[hidden] { display: none !important; }
+#sdg-image-preview .sdg-preview-close {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    border-radius: 50%;
+    background: #222;
+    color: #fff;
+    font-size: 22px;
+    cursor: pointer;
+}
+#sdg-image-preview .sdg-preview-error { text-align: center; overflow-wrap: anywhere; }
+.sdg-img:focus-visible, #sdg-image-preview .sdg-preview-close:focus-visible {
+    outline: 2px solid #8ac7ff;
+    outline-offset: 3px;
 }

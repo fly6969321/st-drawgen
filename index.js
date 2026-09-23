@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.6.0
+ *  生图工坊 · DrawGen v1.6.32
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.31";
+    const VERSION = "1.6.32";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -796,7 +796,7 @@
         try {
             const chatEl = q("#chat");
             if (!chatEl) {
-                /* #chat 还没挂出来：稍后重试。点击监听（点图开灯箱）不能因为初始化早而丢 */
+                /* #chat 还没挂出来：稍后重试安装楼层按钮和观察器。 */
                 if ((installMesButtonsObserver.tries || 0) < 60) {
                     installMesButtonsObserver.tries = (installMesButtonsObserver.tries || 0) + 1;
                     setTimeout(installMesButtonsObserver, 1000);
@@ -814,13 +814,11 @@
             window.__sdgMesBtnObs.observe(chatEl, { childList: true, subtree: true });
             if (!window.__sdgMesBtnClick) {
                 window.__sdgMesBtnClick = true;
-                /* 绑 window 捕获：只管插件自己的按钮 / 折叠条 / 翻页 / 灯箱关闭。
-                   点图开预览不在这里——改为创建图片时就地绑定（智慧姬式，用户手机实测可用），
-                   全局层不再拦任何图片点击 */
+                /* 只处理插件按钮 / 折叠条 / 翻页；图片预览独立安装，不依赖观察器。 */
                 window.addEventListener("click", function (ev) {
                     const tg = ev.target;
                     if (!tg || !tg.closest) return;
-                    /* 楼里：生成图片 / 折叠条 / ↻ 重画 / 翻页（点图在图片自己身上，见 fillSlot/孤儿图） */
+                    /* 楼里：生成图片 / 折叠条 / ↻ 重画 / 翻页（点图由 bindImagePreview 安装的监听处理） */
                     const slot = tg.closest(".sdg-slot");
                     if (slot) {
                         const m0 = slot.closest(".mes"); const idx0 = m0 ? Number(m0.getAttribute("mesid")) : NaN;
@@ -1430,6 +1428,85 @@
         if (h && Math.round(h * 0.7) > SDG_CAP_H) SDG_CAP_H = Math.round(h * 0.7);
         return SDG_CAP_H ? SDG_CAP_H + "px" : "70vh";
     }
+    let closeImagePreview = null;
+    let imagePreviewEventsBound = false;
+    function openImagePreview(src, trigger) {
+        if (!src) return;
+        if (closeImagePreview) closeImagePreview();
+        const box = document.createElement("dialog");
+        box.id = "sdg-image-preview";
+        box.setAttribute("aria-label", "生成图片预览");
+        box.setAttribute("aria-modal", "true");
+        box.setAttribute("role", "dialog");
+        box.innerHTML = '<button type="button" class="sdg-preview-close" aria-label="关闭图片预览" title="关闭（Esc）" autofocus>✕</button>' +
+            '<img class="sdg-preview-image" alt="生成图片预览">' +
+            '<p class="sdg-preview-error" role="status" hidden>图片加载失败，请关闭后重试；远程图片链接可能已过期。</p>';
+        const image = box.querySelector("img");
+        const button = box.querySelector("button");
+        const close = function () {
+            document.removeEventListener("keydown", onKey, true);
+            box.remove();
+            if (closeImagePreview === close) closeImagePreview = null;
+            // 只把焦点还给触发图片，不聚焦聊天输入框，避免手机键盘弹出。
+            if (trigger && trigger.isConnected) trigger.focus({ preventScroll: true });
+        };
+        const onKey = function (ev) {
+            if (ev.key === "Escape") {
+                ev.preventDefault(); ev.stopPropagation(); close();
+            } else if (ev.key === "Tab") {
+                // 预览只有关闭按钮可交互；旧 WebView 的非模态兜底也不能把焦点漏到聊天区。
+                ev.preventDefault(); ev.stopPropagation(); button.focus();
+            }
+        };
+        button.addEventListener("click", close);
+        box.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            if (ev.target === box) close();
+        });
+        box.addEventListener("cancel", function (ev) { ev.preventDefault(); close(); });
+        box.addEventListener("close", close);
+        image.addEventListener("error", function () {
+            image.hidden = true;
+            box.querySelector(".sdg-preview-error").hidden = false;
+        });
+        // 不拼接到 HTML，兼容 data URL、blob URL 及带查询参数的远程图片。
+        image.src = src;
+        document.body.appendChild(box);
+        closeImagePreview = close;
+        document.addEventListener("keydown", onKey, true);
+        try {
+            // 原生 top layer 不受酒馆主题的 z-index / transform 遮挡。
+            box.showModal();
+        } catch (e) {
+            // 老版手机 WebView 没有 showModal 时仍可预览。
+            box.setAttribute("open", "");
+        }
+        button.focus({ preventScroll: true });
+    }
+    function bindImagePreview(image) {
+        image.tabIndex = 0;
+        image.setAttribute("role", "button");
+        image.setAttribute("aria-label", "点击放大生成图片");
+        image.title = "点击放大预览";
+        if (imagePreviewEventsBound) return;
+        imagePreviewEventsBound = true;
+        const activate = function (ev) {
+            if (ev.type === "keydown" && ev.key !== "Enter" && ev.key !== " ") return;
+            const target = ev.target;
+            const im = target && target.closest && target.closest("#chat .mes .mes_text img.sdg-img");
+            if (!im) return;
+            // src 属性随历史翻页立即更新；currentSrc 在新图片加载前可能仍指向旧图。
+            const src = im.getAttribute("src") || im.currentSrc;
+            if (!src) return;
+            ev.preventDefault(); ev.stopPropagation();
+            openImagePreview(src, im);
+        };
+        // 仅匹配本插件楼层图；捕获阶段避开主题的冒泡拦截，重绘/克隆后也有效。
+        // 只用 click，不另绑 touchend，避免一次触摸打开两次或误把滚动当点击。
+        window.addEventListener("click", activate, true);
+        window.addEventListener("keydown", activate, true);
+    }
+
     /* 一个槽三种样子：生成图片按钮 / 生成中 / 折叠条+图 */
     function fillSlot(body, state, src, open, cur, total) {
         if (state === "busy") {
@@ -1463,6 +1540,7 @@
             im.style.maxHeight = maxImgH();
             im.style.objectFit = "contain";
             im.setAttribute("src", src);
+            bindImagePreview(im);
         }
     }
 
@@ -1547,6 +1625,7 @@
                 el.appendChild(img);
             }
             if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+            bindImagePreview(img);
             return true;
         }
 
