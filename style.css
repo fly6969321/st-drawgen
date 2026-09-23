@@ -676,7 +676,7 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
     .sdg-slot, .sdg-img.sdg-orphan { max-width: 100% !important; }
 }
 
-/* 原图预览：工具栏固定，图片区域独立双向滚动，不受楼层图片尺寸规则限制。 */
+/* 简洁图片预览：默认适屏，图片区域独立缩放/拖动，不改变页面比例。 */
 html.sdg-preview-open, html.sdg-preview-open body { overflow: hidden !important; }
 #sdg-image-preview[open] {
     display: flex !important;
@@ -700,44 +700,25 @@ html.sdg-preview-open, html.sdg-preview-open body { overflow: hidden !important;
     overscroll-behavior: contain;
 }
 #sdg-image-preview::backdrop { background: rgba(0, 0, 0, 0.9); }
-#sdg-image-preview .sdg-preview-toolbar {
-    display: flex;
-    align-items: center;
-    flex: 0 0 auto;
-    gap: 8px;
-    padding: max(4px, env(safe-area-inset-top)) 8px 4px;
-    background: #111;
-}
-#sdg-image-preview .sdg-preview-size {
-    flex: 1;
-    min-width: 0;
-    font: 12px/1.4 sans-serif !important;
-    color: #aaa;
-    overflow-wrap: anywhere;
-}
-#sdg-image-preview .sdg-preview-toolbar button {
+#sdg-image-preview .sdg-preview-close {
+    position: absolute !important;
+    top: max(6px, env(safe-area-inset-top)) !important;
+    right: max(6px, env(safe-area-inset-right)) !important;
+    z-index: 1;
     box-sizing: border-box !important;
-    flex: 0 0 auto;
-    width: auto !important;
+    width: 36px !important;
     height: 36px !important;
-    min-height: 0 !important;
     min-width: 0 !important;
+    min-height: 0 !important;
     margin: 0 !important;
-    padding: 0 8px !important;
+    padding: 0 !important;
     border: 0 !important;
     border-radius: 4px !important;
-    background: transparent !important;
-    color: #ddd !important;
-    font: 12px/1 sans-serif !important;
+    background: rgba(0, 0, 0, 0.45) !important;
+    color: #fff !important;
+    font: 18px/1 sans-serif !important;
     box-shadow: none !important;
     cursor: pointer;
-}
-#sdg-image-preview .sdg-preview-toolbar button:hover { background: #282828 !important; }
-#sdg-image-preview .sdg-preview-toolbar button:disabled { opacity: 0.4; cursor: default; }
-#sdg-image-preview .sdg-preview-toolbar .sdg-preview-close {
-    width: 36px !important;
-    padding: 0 !important;
-    font: 18px/1 sans-serif !important;
 }
 #sdg-image-preview .sdg-preview-viewport {
     flex: 1 1 0;
@@ -745,7 +726,7 @@ html.sdg-preview-open, html.sdg-preview-open body { overflow: hidden !important;
     min-height: 0;
     overflow: auto;
     overscroll-behavior: contain;
-    touch-action: pan-x pan-y pinch-zoom;
+    touch-action: none; /* 仅图片视口使用自定义单指拖动/双指缩放，不缩放整个页面。 */
     -webkit-overflow-scrolling: touch;
 }
 #sdg-image-preview .sdg-preview-canvas {
@@ -757,6 +738,7 @@ html.sdg-preview-open, html.sdg-preview-open body { overflow: hidden !important;
     min-height: 100%;
 }
 #sdg-image-preview .sdg-preview-image {
+    visibility: hidden;
     display: block;
     flex: 0 0 auto !important;
     width: auto;
@@ -773,7 +755,6 @@ html.sdg-preview-open, html.sdg-preview-open body { overflow: hidden !important;
     user-select: none;
     -webkit-user-select: none;
 }
-#sdg-image-preview[data-mode="original"] .sdg-preview-image { cursor: grab; }
 #sdg-image-preview .sdg-preview-dragging,
 #sdg-image-preview .sdg-preview-dragging .sdg-preview-image { cursor: grabbing; }
 #sdg-image-preview .sdg-preview-image[hidden],
