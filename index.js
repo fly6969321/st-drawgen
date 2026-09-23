@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.6.32
+ *  生图工坊 · DrawGen v1.6.33
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.32";
+    const VERSION = "1.6.33";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1435,52 +1435,118 @@
         if (closeImagePreview) closeImagePreview();
         const box = document.createElement("dialog");
         box.id = "sdg-image-preview";
+        box.dataset.mode = "original";
         box.setAttribute("aria-label", "生成图片预览");
         box.setAttribute("aria-modal", "true");
         box.setAttribute("role", "dialog");
-        box.innerHTML = '<button type="button" class="sdg-preview-close" aria-label="关闭图片预览" title="关闭（Esc）" autofocus>✕</button>' +
-            '<img class="sdg-preview-image" alt="生成图片预览">' +
-            '<p class="sdg-preview-error" role="status" hidden>图片加载失败，请关闭后重试；远程图片链接可能已过期。</p>';
+        box.innerHTML = '<div class="sdg-preview-toolbar">' +
+            '<span class="sdg-preview-size" role="status">加载原图…</span>' +
+            '<button type="button" class="sdg-preview-mode" disabled>适应屏幕</button>' +
+            '<button type="button" class="sdg-preview-close" aria-label="关闭图片预览" title="关闭（Esc）" autofocus>×</button></div>' +
+            '<div class="sdg-preview-viewport"><div class="sdg-preview-canvas">' +
+            '<img class="sdg-preview-image" alt="生成图片预览" draggable="false">' +
+            '<p class="sdg-preview-error" role="status" hidden>图片加载失败，请关闭后重试；远程图片链接可能已过期。</p></div></div>';
         const image = box.querySelector("img");
-        const button = box.querySelector("button");
+        const button = box.querySelector(".sdg-preview-close");
+        const modeButton = box.querySelector(".sdg-preview-mode");
+        const status = box.querySelector(".sdg-preview-size");
+        const viewport = box.querySelector(".sdg-preview-viewport");
+        const canvas = box.querySelector(".sdg-preview-canvas");
+        let original = true, closed = false, drag = null, dragged = false;
+        const layout = function () {
+            if (closed || image.hidden || !image.naturalWidth || !image.naturalHeight) return;
+            const w = image.naturalWidth, h = image.naturalHeight;
+            // 100% = 图片固有尺寸（CSS px），不再受楼层/屏幕的 max-width 限制。
+            const scale = original ? 1 : Math.min(1, viewport.clientWidth / w, viewport.clientHeight / h);
+            if (!(scale > 0)) return;
+            image.style.setProperty("width", (w * scale) + "px", "important");
+            image.style.setProperty("height", (h * scale) + "px", "important");
+            box.dataset.mode = original ? "original" : "fit";
+            modeButton.disabled = false;
+            modeButton.textContent = original ? "适应屏幕" : "原图 100%";
+            status.textContent = (original ? "100%" : Math.round(scale * 100) + "%") + " · " + w + " × " + h;
+            // 原图比视口大时先看中央，再通过原生触摸滚动/鼠标拖动查看四周。
+            viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+            viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+        };
         const close = function () {
+            if (closed) return;
+            closed = true;
             document.removeEventListener("keydown", onKey, true);
+            window.removeEventListener("resize", layout);
+            document.documentElement.classList.remove("sdg-preview-open");
             box.remove();
             if (closeImagePreview === close) closeImagePreview = null;
-            // 只把焦点还给触发图片，不聚焦聊天输入框，避免手机键盘弹出。
             if (trigger && trigger.isConnected) trigger.focus({ preventScroll: true });
         };
         const onKey = function (ev) {
             if (ev.key === "Escape") {
                 ev.preventDefault(); ev.stopPropagation(); close();
             } else if (ev.key === "Tab") {
-                // 预览只有关闭按钮可交互；旧 WebView 的非模态兜底也不能把焦点漏到聊天区。
-                ev.preventDefault(); ev.stopPropagation(); button.focus();
+                // 原生模态与旧 WebView 兜底使用同一套焦点循环。
+                const buttons = Array.from(box.querySelectorAll("button:not(:disabled)"));
+                const index = buttons.indexOf(document.activeElement);
+                const next = (index + (ev.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+                ev.preventDefault(); ev.stopPropagation(); buttons[next].focus();
             }
         };
         button.addEventListener("click", close);
+        modeButton.addEventListener("click", function () { original = !original; layout(); });
         box.addEventListener("click", function (ev) {
             ev.stopPropagation();
-            if (ev.target === box) close();
+            // 拖动结束生成的 click 不能误关弹窗。
+            if (dragged) { dragged = false; return; }
+            if (ev.target === box || ev.target === viewport || ev.target === canvas) close();
         });
+        // 手机使用浏览器原生双向滚动，保留惯性与双指页面缩放；仅补充鼠标拖动。
+        viewport.addEventListener("pointerdown", function (ev) {
+            dragged = false;
+            if (ev.pointerType !== "mouse" || ev.button !== 0) return;
+            drag = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
+        });
+        viewport.addEventListener("pointermove", function (ev) {
+            if (!drag || drag.id !== ev.pointerId) return;
+            if (ev.buttons === 0) { endDrag(ev); return; }
+            const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+            if (!dragged && Math.abs(dx) + Math.abs(dy) < 4) return;
+            if (!dragged) {
+                // 确实开始拖动才捕获，避免普通点图被重定向成背景点击。
+                try { viewport.setPointerCapture(ev.pointerId); } catch (e) {}
+            }
+            dragged = true;
+            viewport.classList.add("sdg-preview-dragging");
+            ev.preventDefault();
+            viewport.scrollLeft = drag.left - dx;
+            viewport.scrollTop = drag.top - dy;
+        });
+        const endDrag = function (ev) {
+            if (!drag || drag.id !== ev.pointerId) return;
+            drag = null;
+            viewport.classList.remove("sdg-preview-dragging");
+            try { viewport.releasePointerCapture(ev.pointerId); } catch (e) {}
+        };
+        viewport.addEventListener("pointerup", endDrag);
+        viewport.addEventListener("pointercancel", endDrag);
+        viewport.addEventListener("lostpointercapture", endDrag);
         box.addEventListener("cancel", function (ev) { ev.preventDefault(); close(); });
         box.addEventListener("close", close);
+        image.addEventListener("load", layout);
         image.addEventListener("error", function () {
             image.hidden = true;
+            modeButton.disabled = true;
+            status.textContent = "加载失败";
             box.querySelector(".sdg-preview-error").hidden = false;
         });
-        // 不拼接到 HTML，兼容 data URL、blob URL 及带查询参数的远程图片。
-        image.src = src;
+        document.documentElement.classList.add("sdg-preview-open");
         document.body.appendChild(box);
         closeImagePreview = close;
         document.addEventListener("keydown", onKey, true);
-        try {
-            // 原生 top layer 不受酒馆主题的 z-index / transform 遮挡。
-            box.showModal();
-        } catch (e) {
-            // 老版手机 WebView 没有 showModal 时仍可预览。
-            box.setAttribute("open", "");
-        }
+        window.addEventListener("resize", layout);
+        try { box.showModal(); }
+        catch (e) { box.setAttribute("open", ""); }
+        // src 单独赋值，不拼入 HTML；确保图片加载时弹窗已经有可测量的尺寸。
+        image.src = src;
+        if (image.complete) layout();
         button.focus({ preventScroll: true });
     }
     function bindImagePreview(image) {
