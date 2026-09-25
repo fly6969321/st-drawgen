@@ -14,7 +14,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.34";
+    const VERSION = "1.6.35";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1309,6 +1309,33 @@
         catch (e) { log("下载失败，直接用 URL 兜底:", e.message); return u; }
     }
 
+    /* 把生成的图（dataURL）上传到酒馆服务器存成文件，聊天记录里只留链接。
+       不上传的话整张图的 base64 会写进聊天文件，几十次生图后聊天文件上百 MB，
+       手机端 Node 读进内存直接 OOM 崩溃。上传失败则原样返回（老行为兜底）。 */
+    async function persistGenImage(imageUrl) {
+        try {
+            if (!String(imageUrl).startsWith("data:image/")) return imageUrl;
+            const cont = ctx();
+            if (!cont || typeof cont.getRequestHeaders !== "function") return imageUrl;
+            const s = String(imageUrl);
+            const meta = s.slice(0, s.indexOf(","));
+            const b64 = s.slice(s.indexOf(",") + 1);
+            const format = /image\/jpe?g/.test(meta) ? "jpeg" : (/image\/webp/.test(meta) ? "webp" : (/image\/gif/.test(meta) ? "gif" : "png"));
+            const chName = (cont.characterId !== undefined && cont.characters && cont.characters[cont.characterId]) ? String(cont.characters[cont.characterId].name || "") : "";
+            const filename = "sdg_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+            const res = await fetch("/api/images/upload", {
+                method: "POST",
+                headers: cont.getRequestHeaders(),
+                body: JSON.stringify({ image: b64, format: format, ch_name: chName, filename: filename })
+            });
+            if (!res.ok) { log("图片上传服务器失败，保留内嵌存储:", res.status); return imageUrl; }
+            const j = await res.json();
+            if (j && j.path) { log("图片已存服务器:", j.path); return String(j.path).replace(/^\/+/, ""); }
+            log("上传响应缺少 path，保留内嵌存储");
+            return imageUrl;
+        } catch (e) { log("图片上传异常，保留内嵌存储:", e && e.message); return imageUrl; }
+    }
+
     async function generateImage(desc) {
         const c = cfg();
         if (!c.genModel) throw new Error("请先填写生图模型");
@@ -1323,6 +1350,7 @@
             if ((c.convertToJpeg === true || String(c.convertToJpeg) === "true") && String(imageUrl).startsWith("data:image/")) {
                 try { imageUrl = await convertImageToJpeg(imageUrl); } catch (eJ) { log("转 JPEG 失败，保留原图:", eJ.message); }
             }
+            imageUrl = await persistGenImage(imageUrl);
             return { image: imageUrl, prompt: finalPrompt };
         } finally {
             genAbort = null;
