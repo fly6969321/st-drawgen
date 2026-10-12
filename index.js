@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.6.34
+ *  生图工坊 · DrawGen v1.7.0
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -7,14 +7,19 @@
  *  · 楼层正文里每一个 image###…### 标记原位换成图片，一楼几个标记几张图；
  *    没图的标记显示「生成图片」按钮，出图后是折叠条，重画保留历史可翻页
  *  · 面板两个页签卡片「🎨 生图」「📝 提取」；日版 / 夜版主题；酒馆扩展抽屉里有入口块
- *  · 生图 / 提取各自多站点；画风 / 提取规则 / 角色锚点各自多套预设
+ *  · 生图 / 提取各自多站点（首次安装内置常用中转站档案）；画风 / 提取规则 / 角色锚点各自多套预设
  *  · 分层提取：镜头/环境/氛围/人物/服装/动作（六层），各一框一锁，可只重摇一层，环境/氛围/服装跨楼沿用
+ *  · v1.7.0 与 Tavo 生图工坊 v1.18.16 对齐：
+ *    画质 quality 参数（随站点保存）、chat/completions 失败自动退 images/generations、
+ *    地址直指 images 接口时直连、站点只认 response_format=url 时自动改发重试、
+ *    全角 × 尺寸归一化、生图超时（默认 300 秒）与取消真正生效、
+ *    失败提示带 HTTP 状态码与站点原话、画风 JSON 导入导出、预设包导入（模板 / 规则 / 系统提示 / 锚点归并）
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.6.35";
+    const VERSION = "1.7.0";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -78,6 +83,7 @@
         rulesJson: "", rulesId: "",      // 提取规则预设
         anchorsJson: "", anchorsId: "",  // 角色锚点预设
         grokSize: "1024x1024",
+        genQuality: "",            // 画质参数：GPT 2.5 系 low/medium/high/xhigh/max；Grok low/medium/auto；留空不发送（随站点档案保存）
         faceRef: "", faceRefOn: false, faceRefMode: "chat",   // 脸部参考图（data URL）+ 锁脸开关 + 发送方式（chat=聊天多模态 / edits=/images/edits 编辑接口）
         genProxy: false,
         genTimeout: 300,
@@ -88,6 +94,1117 @@
         ballLeft: "", ballTop: "",
         panelLeft: "", panelTop: ""
     };
+
+    /* -- 内置站点档案（与 Tavo 生图工坊 v1.18.16 对齐；仅在本插件首次安装、站点列表为空时播种一次，之后完全由用户自己管理） -- */
+    const BUILTIN_GEN_PROFILE_ID = "smu0ujfttbq";
+    const BUILTIN_EXT_PROFILE_ID = "smu0ujfttce";
+    const BUILTIN_GEN_PROFILES =
+        [
+            {
+                "id":  "smu0ujfttbq",
+                "name":  "wong",
+                "models":  [
+                               "01-ai/yi-large",
+                               "deepseek-ai/deepseek-v4-flash",
+                               "deepseek-ai/deepseek-v4-flash-0731",
+                               "deepseek-ai/deepseek-v4-pro-0813",
+                               "deepseek-v4-flash",
+                               "deepseek-v4-flash-vision-exp",
+                               "glm-5.2-200k",
+                               "glm-5.3-200k",
+                               "google/gemma-4-31b-it",
+                               "grok-4.20-0309-non-reasoning",
+                               "grok-4.20-0309-reasoning",
+                               "grok-4.20-multi-agent-0309",
+                               "grok-4.3",
+                               "grok-4.5",
+                               "grok-4.6",
+                               "grok-4.7",
+                               "grok-composer-2.5-fast",
+                               "grok-imagine-image",
+                               "grok-imagine-image-2.0",
+                               "grok-imagine-image-edit",
+                               "grok-imagine-image-lite",
+                               "grok-imagine-image-quality",
+                               "grok-imagine-video",
+                               "hy-image-v3.5-preview",
+                               "mimo-v2.5",
+                               "mimo-v2.6-flash",
+                               "minimax-m2.1-highspeed",
+                               "minimax-m2.5-highspeed",
+                               "minimax-m2.7-highspeed",
+                               "minimax-m3",
+                               "minimaxai/minimax-m3",
+                               "ministral-14b-latest",
+                               "ministral-3b-latest",
+                               "ministral-8b-latest",
+                               "mistralai/mistral-large",
+                               "moonshotai/kimi-k2.6",
+                               "moonshotai/kimi-k3",
+                               "openai/gpt-oss-120b",
+                               "openai/gpt-oss-20b",
+                               "qwen3.7-max",
+                               "qwen3.8-flash",
+                               "qwen3.8-max",
+                               "qwen3.8-omni-flash",
+                               "sensenova-6.7-flash-lite",
+                               "sensenova-6.8-flash-lite"
+                           ],
+                "endpoint":  "https://wzw.pp.ua/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "grok-imagine-image-2.0",
+                "provider":  "grok",
+                "size":  "1024×1792",
+                "quality":  "medium"
+            },
+            {
+                "id":  "smu123btrp1",
+                "name":  "so",
+                "endpoint":  "https://api.67.si/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2",
+                "models":  [
+                               "deepseek/deepseek-v4-flash",
+                               "gpt-image-2",
+                               "grok-4.20-0309-non-reasoning",
+                               "grok-4.20-0309-reasoning",
+                               "grok-4.20-fast",
+                               "grok-4.20-multi-agent-0309",
+                               "grok-4.5",
+                               "grok-4.6",
+                               "grok-4.7",
+                               "grok-chat-fast",
+                               "grok-imagine-video",
+                               "openai/gpt-oss-120b",
+                               "qwen/qwen3.8-27b",
+                               "qwen3.6-plus",
+                               "qwen3.7-max",
+                               "qwen3.7-plus",
+                               "qwen3.8-max",
+                               "stealth/union-alpha",
+                               "z-ai/glm-5.3-flash"
+                           ],
+                "provider":  "gemini",
+                "size":  "1024×1536",
+                "quality":  "high"
+            },
+            {
+                "id":  "smuc2dlkvis",
+                "name":  "卡皮巴拉",
+                "endpoint":  "https://kapibala.asia/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2.5",
+                "models":  [
+                               "gemini-3.6-flash-high",
+                               "grok-4.6",
+                               "doubao-seedance-2-0-260128",
+                               "grok-imagine-video-1.5",
+                               "gpt-6-sol",
+                               "gpt-6-astra",
+                               "grok-composer-2.5-fast",
+                               "deepseek-v4-pro-0813",
+                               "glm-5.3-flash",
+                               "grok-imagine-image-quality",
+                               "MiniMax-M2.7",
+                               "gpt-6-luna",
+                               "speech-2.8-hd",
+                               "doubao-seedance-2-5-260628",
+                               "speech-2.8-turbo",
+                               "MiniMax-M3",
+                               "grok-imagine-image-2.0",
+                               "image-01",
+                               "deepseek-v4-flash-0731",
+                               "glm-5.2",
+                               "MiniMax-Hailuo-2.3",
+                               "glm-5.3",
+                               "deepseek-v4.1-flash",
+                               "grok-4.5",
+                               "gpt-5.5",
+                               "image-01-live",
+                               "gemini-3.7-flash-high",
+                               "MiniMax-M2.7-highspeed",
+                               "gpt-image-2",
+                               "gpt-6.1-sol",
+                               "gemini-3.8-flash-high",
+                               "gpt-5.6-terra",
+                               "MiniMax-H3-Local",
+                               "Qwen3.8-27B",
+                               "gpt-5.6-luna",
+                               "grok-4.20-multi-agent-0309",
+                               "gpt-image-2.5",
+                               "grok-4.7",
+                               "gpt-5.6-sol"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smug927se4",
+                "name":  "fate",
+                "endpoint":  "https://fate.xxxxa.art/v1/images/generations",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2.5-sunburst",
+                "models":  [
+                               "agnes-2.5-flash",
+                               "agnes-3.0-flash",
+                               "atria-dawn",
+                               "bailu-2.7",
+                               "bailu-dash",
+                               "command-a-plus",
+                               "deepseek-v4-flash",
+                               "deepseek-v4.1-flash",
+                               "dots-3-note-preview",
+                               "gemini-3.6-flash",
+                               "gemini-3.7-flash",
+                               "glm-4.7-flash",
+                               "glm-5.2",
+                               "glm-5.3",
+                               "glm-5.3-flash",
+                               "gpt-image-2",
+                               "gpt-image-2.5-flare",
+                               "gpt-image-2.5-sunburst",
+                               "grok-4.7",
+                               "grok-composer-2.5-fast",
+                               "hy3",
+                               "kimi-k3",
+                               "ling-3.0-flash-fin",
+                               "longcat-2.5-preview",
+                               "mercury-2.5",
+                               "mimo-v2.5",
+                               "mimo-v2.6-flash",
+                               "minimax-m3",
+                               "muse-spark-1.3-contributor",
+                               "nemotron-3.5-lightning-30b",
+                               "qwen3-8b",
+                               "qwen3.8-27b",
+                               "sensenova-6.8-flash-lite",
+                               "sensenova-u1.5-lite",
+                               "space-bunny-alpha",
+                               "step-3.5-flash",
+                               "step-3.7-flash",
+                               "step-5-preview"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smumhpgodan",
+                "name":  "node",
+                "endpoint":  "https://cn.nodeproxy.download/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "firefly-gpt-image",
+                "models":  [
+                               "firefly-gemini-omni",
+                               "minimax-m2",
+                               "minimax-m2.1",
+                               "firefly-seedance20-fast",
+                               "gemini-3.1-pro-preview",
+                               "firefly-veo31-ref",
+                               "gemma3:12b",
+                               "gemini-3.1-flash-image",
+                               "gemini-3.7-flash-high",
+                               "firefly-nano-banana",
+                               "firefly-veo31-fast",
+                               "glm-4.6",
+                               "minimax-m3",
+                               "gemini-3.6-flash-high",
+                               "gemini-3.5-flash-low",
+                               "gemini-3.1-pro-low",
+                               "minimax-m2.5",
+                               "gemma4:31b",
+                               "firefly-nano-banana2",
+                               "firefly-seedance20",
+                               "glm-4.7",
+                               "gemma3:4b",
+                               "gemini-3-flash",
+                               "firefly-gpt-image",
+                               "firefly-kling3",
+                               "gemini-3.1-pro-high",
+                               "firefly-veo31",
+                               "firefly-nano-banana-pro",
+                               "gemini-3.8-flash-high",
+                               "firefly-kling-o3",
+                               "gemma3:27b",
+                               "gemini-3.1-flash-lite",
+                               "gemini-3.5-flash-high"
+                           ],
+                "size":  "768×1024"
+            },
+            {
+                "id":  "smunetg02p7",
+                "name":  "咕嘎",
+                "endpoint":  "https://ai.xmiaom.com/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2.5",
+                "models":  [
+                               "chatgpt-voice",
+                               "claude-sonnet-5",
+                               "claude-sonnet-5.5",
+                               "deepseek-v4.1-flash",
+                               "gemini-3.7-flash",
+                               "glm-5.3",
+                               "glm-5.3-flash",
+                               "gpt-5.6-sol",
+                               "gpt-6-sol",
+                               "gpt-image-2.5",
+                               "gpt-image-2.5-4k",
+                               "grok-4.20-multi-agent-xhigh",
+                               "grok-4.3-fast",
+                               "grok-4.6",
+                               "grok-4.7",
+                               "grok-imagine-image",
+                               "grok-imagine-image-2.0",
+                               "grok-imagine-image-lite",
+                               "grok-imagine-image-pro",
+                               "grok-imagine-video",
+                               "hy4",
+                               "jev-latest",
+                               "kimi-k3",
+                               "mimo-v2.5",
+                               "mimo-v2.6-flash",
+                               "minimax-h3",
+                               "muse-spark-1.3-contributor",
+                               "Nano Banana 2",
+                               "Nano Banana 2 Lite",
+                               "Nano Banana Pro",
+                               "NSFW",
+                               "omni1.1-flash",
+                               "qwen3.8-flash",
+                               "space-bunny-alpha",
+                               "veo-3.1-fast",
+                               "veo-3.1-lite",
+                               "veo-3.1-quality"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smutfmlvylv",
+                "name":  "松贝",
+                "endpoint":  "https://draw.songbey.com/v1/images/generations",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2.5",
+                "models":  [
+                               "gpt-image-2.5"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smuttp97ea0",
+                "name":  "帝国",
+                "endpoint":  "https://ar26710.space/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2",
+                "models":  [
+                               "[anti]claude-opus-4-6-thinking",
+                               "[anti]claude-sonnet-4-6",
+                               "[anti]gemini-3-flash",
+                               "[anti]gemini-3.1-flash-lite",
+                               "[anti]gemini-3.1-pro-preview",
+                               "[anti]gemini-3.5-flash",
+                               "[anti]gemini-3.6-flash",
+                               "[anti]gemini-3.7-flash",
+                               "[anti]gemini-3.8-flash",
+                               "[c]claude-3-7-sonnet",
+                               "[c]claude-sonnet-4",
+                               "[free-key]gemini-2.5-flash",
+                               "[free-key]gemini-3-flash-preview",
+                               "[free-key]gemini-3.1-flash-lite-preview",
+                               "[free-key]gemini-3.5-flash",
+                               "[free-key]gemini-3.6-flash",
+                               "[free-key]gemini-3.7-flash",
+                               "[G]deepseek-v3.1",
+                               "[G]deepseek-v3.2",
+                               "[G]minimax-m2.7",
+                               "[K]GLM-5.3-Flash",
+                               "[N]glm-5.3",
+                               "[N]glm-5.3-flash",
+                               "[N]kimi-k3",
+                               "[N]minimax-m3",
+                               "[web]gemini-3.5-flash",
+                               "[web]gemini-3.5-flash-thinking",
+                               "[web]gemini-3.6-flash",
+                               "[web]gemini-3.7-flash",
+                               "[假流]gemini-2.5-pro",
+                               "[假流]gemini-2.5-pro-search",
+                               "[假流]gemini-3.1-pro-preview",
+                               "[假流]gemini-3.1-pro-preview-search",
+                               "[假流]gemini-3.5-flash",
+                               "[假流]gemini-3.5-flash-search",
+                               "[假流]gemini-3.6-flash",
+                               "[假流]gemini-3.6-flash-search",
+                               "[假流]gemini-3.7-flash",
+                               "[假流]gemini-3.7-flash-search",
+                               "[假流]gemini-3.8-flash",
+                               "[假流]gemini-3.8-flash-search",
+                               "[官反]grok-4.20-fast",
+                               "[官反]grok-4.5",
+                               "[官反]grok-4.6",
+                               "[正式版]DeepSeek-V4-Flash-0731",
+                               "[正式版N]deepseek-v4-flash",
+                               "[正式版N]deepseek-v4-pro",
+                               "[正式版Y]deepseek-v4.1-flash",
+                               "[绘图]gemini-3.1-flash-image",
+                               "gpt-image-2"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "high"
+            },
+            {
+                "id":  "smuu10fkzon",
+                "name":  "肘子",
+                "endpoint":  "https://api.dzzi.ai/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "[按次]gpt-image-2.5-flare",
+                "models":  [
+                               "[CLI]gemini-3-flash-preview",
+                               "[CLI]gemini-3-flash-preview-128",
+                               "[CLI]gemini-3-flash-preview-128-nothinking",
+                               "[CLI]gemini-3-flash-preview-nothinking",
+                               "[CLI]gemini-3.5-flash",
+                               "[CLI]gemini-3.5-flash-128",
+                               "[CLI]gemini-3.5-flash-128-nothinking",
+                               "[CLI]gemini-3.5-flash-nothinking",
+                               "[CLI]gemini-3.8-flash",
+                               "[CLI]gemini-3.8-flash-128",
+                               "[CLI]gemini-3.8-flash-128-nothinking",
+                               "[CLI]gemini-3.8-flash-nothinking",
+                               "[kiro]claude-opus-4-6",
+                               "[kiro]claude-opus-4-6-thinking",
+                               "[kiro]claude-opus-4-7",
+                               "[kiro]claude-opus-4-7-thinking",
+                               "[kiro]claude-opus-4-8",
+                               "[kiro]claude-opus-4-8-thinking",
+                               "[kiro]claude-opus-5",
+                               "[kiro]claude-opus-5-5",
+                               "[kiro]claude-opus-5-thinking",
+                               "[kiro]claude-sonnet-4-6",
+                               "[kiro]claude-sonnet-5",
+                               "[按次]claude-haiku-4-5",
+                               "[按次]claude-haiku-4-5-20251001",
+                               "[按次]claude-haiku-4-5-thinking",
+                               "[按次]claude-opus-4-6",
+                               "[按次]claude-opus-4-6-thinking",
+                               "[按次]claude-opus-4-6-thinking-high",
+                               "[按次]claude-opus-4-6-thinking-low",
+                               "[按次]claude-opus-4-6-thinking-max",
+                               "[按次]claude-opus-4-7",
+                               "[按次]claude-opus-4-7-thinking",
+                               "[按次]claude-opus-4-7-thinking-high",
+                               "[按次]claude-opus-4-7-thinking-low",
+                               "[按次]claude-opus-4-7-thinking-max",
+                               "[按次]claude-opus-4-7-thinking-xhigh",
+                               "[按次]claude-opus-4-8",
+                               "[按次]claude-opus-4-8-thinking",
+                               "[按次]claude-opus-4-8-thinking-high",
+                               "[按次]claude-opus-4-8-thinking-low",
+                               "[按次]claude-opus-4-8-thinking-max",
+                               "[按次]claude-opus-4-8-thinking-xhigh",
+                               "[按次]claude-opus-5",
+                               "[按次]claude-opus-5-5",
+                               "[按次]claude-opus-5-5-thinking-high",
+                               "[按次]claude-opus-5-5-thinking-low",
+                               "[按次]claude-opus-5-5-thinking-max",
+                               "[按次]claude-opus-5-thinking",
+                               "[按次]claude-opus-5-thinking-max",
+                               "[按次]claude-opus-5-thinking-xhigh",
+                               "[按次]claude-sonnet-4-6",
+                               "[按次]claude-sonnet-4-6-thinking",
+                               "[按次]claude-sonnet-4-6-thinking-high",
+                               "[按次]claude-sonnet-4-6-thinking-max",
+                               "[按次]claude-sonnet-5",
+                               "[按次]claude-sonnet-5-5",
+                               "[按次]claude-sonnet-5-5-thinking",
+                               "[按次]deepseek-v4-flash",
+                               "[按次]deepseek-v4-flash-0731",
+                               "[按次]deepseek-v4-pro",
+                               "[按次]deepseek-v4-pro-0813",
+                               "[按次]deepseek-v4-pro-0813-thinking",
+                               "[按次]deepseek-v4-pro-thinking",
+                               "[按次]deepseek-v4.1-flash",
+                               "[按次]gemini-3-flash-preview",
+                               "[按次]gemini-3-flash-preview-128",
+                               "[按次]gemini-3-flash-preview-128-nothinking",
+                               "[按次]gemini-3-flash-preview-nothinking",
+                               "[按次]gemini-3-pro-preview",
+                               "[按次]gemini-3-pro-preview-128",
+                               "[按次]gemini-3-pro-preview-128-nothinking",
+                               "[按次]gemini-3-pro-preview-nothinking",
+                               "[按次]gemini-3-pro-preview-thinking",
+                               "[按次]gemini-3.1-pro-preview",
+                               "[按次]gemini-3.1-pro-preview-128",
+                               "[按次]gemini-3.1-pro-preview-128-nothinking",
+                               "[按次]gemini-3.1-pro-preview-nothinking",
+                               "[按次]gemini-3.1-pro-preview-online",
+                               "[按次]gemini-3.6-flash",
+                               "[按次]gemini-3.6-flash-128",
+                               "[按次]gemini-3.6-flash-128-nothinking",
+                               "[按次]gemini-3.6-flash-nothinking",
+                               "[按次]gemini-3.7-flash",
+                               "[按次]gemini-3.7-flash-128",
+                               "[按次]gemini-3.7-flash-128-nothinking",
+                               "[按次]gemini-3.7-flash-nothinking",
+                               "[按次]gemini-3.8-flash",
+                               "[按次]gemini-3.8-flash-128",
+                               "[按次]gemini-3.8-flash-128-nothinking",
+                               "[按次]gemini-3.8-flash-nothinking",
+                               "[按次]glm-5.2",
+                               "[按次]glm-5.2-thinking",
+                               "[按次]glm-5.3",
+                               "[按次]gpt-5.2",
+                               "[按次]gpt-5.3-codex",
+                               "[按次]gpt-5.4",
+                               "[按次]gpt-5.5",
+                               "[按次]gpt-5.6-sol",
+                               "[按次]gpt-5.6-sol-max",
+                               "[按次]gpt-5.6-terra",
+                               "[按次]gpt-6-astra",
+                               "[按次]gpt-6-astra-max",
+                               "[按次]gpt-6-sol",
+                               "[按次]gpt-6.1-sol",
+                               "[按次]gpt-6.1-sol-max",
+                               "[按次]gpt-image-2",
+                               "[按次]gpt-image-2.5",
+                               "[按次]gpt-image-2.5-flare",
+                               "[按次]gpt-image-2.5-sunburst",
+                               "[按次]grok-4.20-0309-non-reasoning",
+                               "[按次]grok-4.20-0309-reasoning",
+                               "[按次]grok-4.3",
+                               "[按次]grok-4.3-thinking",
+                               "[按次]grok-4.5",
+                               "[按次]grok-4.6",
+                               "[按次]grok-4.7",
+                               "[按次]grok-build-0.1",
+                               "[按次]kimi-k2.6",
+                               "[按次]kimi-k3",
+                               "[按次]minimax-m3",
+                               "[按次]minimax-m3-thinking",
+                               "[正价kiro]claude-opus-4-5",
+                               "[正价kiro]claude-opus-4-6",
+                               "[正价kiro]claude-opus-4-6-thinking",
+                               "[正价kiro]claude-opus-4-6-thinking-high",
+                               "[正价kiro]claude-opus-4-6-thinking-low",
+                               "[正价kiro]claude-opus-4-6-thinking-max",
+                               "[正价kiro]claude-opus-4-7",
+                               "[正价kiro]claude-opus-4-7-thinking",
+                               "[正价kiro]claude-opus-4-7-thinking-high",
+                               "[正价kiro]claude-opus-4-7-thinking-low",
+                               "[正价kiro]claude-opus-4-7-thinking-max",
+                               "[正价kiro]claude-opus-4-7-thinking-xhigh",
+                               "[正价kiro]claude-opus-4-8",
+                               "[正价kiro]claude-opus-4-8-thinking",
+                               "[正价kiro]claude-opus-4-8-thinking-high",
+                               "[正价kiro]claude-opus-4-8-thinking-low",
+                               "[正价kiro]claude-opus-4-8-thinking-max",
+                               "[正价kiro]claude-opus-4-8-thinking-xhigh",
+                               "[正价kiro]claude-opus-5",
+                               "[正价kiro]claude-opus-5-thinking",
+                               "[正价kiro]claude-opus-5-thinking-high",
+                               "[正价kiro]claude-opus-5-thinking-low",
+                               "[正价kiro]claude-opus-5-thinking-max",
+                               "[正价kiro]claude-opus-5-thinking-xhigh",
+                               "[正价kiro]claude-opus-5.5",
+                               "[正价kiro]claude-opus-5.5-thinking",
+                               "[正价kiro]claude-opus-5.5-thinking-max",
+                               "[正价kiro]claude-opus-5.5-thinking-xhigh",
+                               "[正价kiro]claude-sonnet-4-5",
+                               "[正价kiro]claude-sonnet-4-6",
+                               "[正价kiro]claude-sonnet-4-6-thinking",
+                               "[正价kiro]claude-sonnet-4-6-thinking-high",
+                               "[正价kiro]claude-sonnet-4-6-thinking-low",
+                               "[正价kiro]claude-sonnet-4-6-thinking-max",
+                               "[正价kiro]claude-sonnet-5",
+                               "[正价kiro]claude-sonnet-5-thinking",
+                               "[正价kiro]claude-sonnet-5-thinking-high",
+                               "[正价kiro]claude-sonnet-5-thinking-low",
+                               "[正价kiro]claude-sonnet-5-thinking-max",
+                               "[正价kiro]claude-sonnet-5-thinking-xhigh",
+                               "[正价kiro]claude-sonnet-5.5",
+                               "[正价kiro]claude-sonnet-5.5-thinking",
+                               "[正价kiro]claude-sonnet-5.5-thinking-high",
+                               "[正价kiro]claude-sonnet-5.5-thinking-low",
+                               "[正价kiro]claude-sonnet-5.5-thinking-max",
+                               "[正价kiro]claude-sonnet-5.5-thinking-xhigh",
+                               "gpt-image-2",
+                               "gpt-image-2.5",
+                               "n-gpt-image-2"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smuu1hgezl7",
+                "name":  "空悲切",
+                "endpoint":  "https://api.blanka.cc/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "[超分4K]gpt-image-2.5-sunburst",
+                "models":  [
+                               "[MAX-CC]claude-fable-5-1",
+                               "grok-4.6",
+                               "kimi-k2.7",
+                               "nai-diffusion-4-5-curated",
+                               "[vertex]gemini-3.8-flash",
+                               "[kiro量高缓]claude-opus-4-6",
+                               "[特特价次kiro]claude-opus-4-6-thinking",
+                               "[vertex]gemini-3.1-pro-preview",
+                               "[AWSB]claude-opus-4-7",
+                               "[ais分流1]gemini-2.5-pro-preview-06-05",
+                               "[限时免费kiro-free]claude-sonnet-4-5",
+                               "[次]deepseek-v4.1-flash",
+                               "[次AG]claude-sonnet-4-6",
+                               "[0.2]glm-5.3",
+                               "[特特价次kiro]claude-opus-4-8-thinking",
+                               "[外审]deepseek-v4-flash-vision-exp",
+                               "[高价稳定次kiro]claude-sonnet-5",
+                               "[特特价次kiro]claude-opus-5-thinking",
+                               "[OCG]deepseek-v4-flash-vision-exp",
+                               "[AWSB]claude-opus-4-6",
+                               "[次cursor]claude-opus-5",
+                               "[cursor量]claude-fable-5",
+                               "[反重力量]gemini-3.6-flash-high",
+                               "[限时特价不稳定按次]glm-5.3",
+                               "[高价稳定次kiro]claude-sonnet-5-thinking",
+                               "[cursor量]claude-sonnet-5",
+                               "[超分4K]gpt-image-2.5-sunburst",
+                               "[高价稳定次kiro]claude-opus-4-8",
+                               "[特价]kimi-k3",
+                               "[破甲]gpt-5.6-sol",
+                               "[高价稳定次kiro]claude-opus-5",
+                               "[cursor量]claude-sonnet-4-6",
+                               "kimi-k3",
+                               "gpt-6-astra",
+                               "BAAI/bge-m3",
+                               "[ais分流1]gemini-3.1-pro-preview",
+                               "[AG量]claude-sonnet-4-6",
+                               "[特特价次kiro]claude-opus-4-7-thinking",
+                               "[自部署]deepseek-v4-pro-0813",
+                               "[0.12]glm-5.3-flash",
+                               "[特价]glm-5.3",
+                               "[0.2]glm-5.3-flash",
+                               "doubao-seed-2-1-pro-260628",
+                               "[次cursor]claude-opus-4-7",
+                               "gpt-5.5",
+                               "[ais分流1]gemini-3.7-flash",
+                               "[高价稳定次kiro]claude-sonnet-4.6-thinking",
+                               "[企业级4K]gpt-image-2",
+                               "[企业级]gpt-image-2.5-flare",
+                               "[高价稳定次kiro]claude-opus-4-7",
+                               "gpt-6.1-sol",
+                               "[ais]gemini-3.1-pro-preview",
+                               "grok-4.7",
+                               "[特价]gpt-image-2.5-sunburst-1k",
+                               "gpt-5.6-sol",
+                               "[MAX-CC]claude-opus-5",
+                               "[反重力量]gemini-3.7-flash-high",
+                               "gpt-6-sol",
+                               "[AWSB次]claude-opus-4-8",
+                               "[free账号]claude-sonnet-4-5-thinking",
+                               "[次cursor]claude-fable-5",
+                               "[MAX-CC]claude-opus-4-6",
+                               "[0.12]deepseek-v4.1-flash",
+                               "[kiro量高缓]claude-opus-4-8",
+                               "[网页]deepseek-v4-flash",
+                               "[ais]gemini-3.8-flash",
+                               "[反重力次]gemini-3.1-pro-high",
+                               "[反重力次]gemini-3.1-flash-lite",
+                               "[ais分流1]gemini-3.6-flash",
+                               "[特价纯血]claude-sonnet-4-6",
+                               "grok-4.5",
+                               "[free账号]claude-sonnet-4-5",
+                               "nai-diffusion-4-full",
+                               "[外审]glm-5.1",
+                               "[高价稳定次kiro]claude-opus-4.7-thinking",
+                               "[特价]glm-5.2",
+                               "[特价]gpt-image-2-1k",
+                               "[AWSB次]claude-opus-4-6",
+                               "doubao-seed-2-0-pro-260215",
+                               "[企业次cli]gemini-3.1-pro-preview",
+                               "[反重力次]gemini-3.6-flash-high",
+                               "[AG量]claude-opus-4-6",
+                               "[ais]gemini-2.5-pro-preview-03-25",
+                               "[次cursor]claude-opus-4-8",
+                               "[AWSB]claude-sonnet-5",
+                               "[vertex]gemini-2.5-pro",
+                               "[特价]minimax-m3",
+                               "[特价]gpt-image-2.5-flare-1k",
+                               "[企业级4K]gpt-image-2.5-flare",
+                               "[高价稳定次kiro]claude-sonnet-4-6",
+                               "qwen3.8-max",
+                               "[特价]kimi-k2.7-code",
+                               "[企业次cli]gemini-2.5-pro",
+                               "[次]deepseek-v4-flash",
+                               "[AWSB]claude-haiku-4-5",
+                               "[高价稳定次kiro]claude-opus-5-5",
+                               "[外审]glm-5.3",
+                               "[kiro量高缓]claude-opus-4-8-thinking",
+                               "[0.12]deepseek-v4-flash-0731",
+                               "nai-diffusion-5-full",
+                               "[cursor量]claude-opus-5",
+                               "[MAX混次]claude-opus-4-6-thinking",
+                               "[MAX-CC]claude-opus-4-7",
+                               "[kiro量高缓]claude-sonnet-5",
+                               "[限时]gpt-5.6-sol",
+                               "[VER次]claude-opus-4-6",
+                               "[cursor量]claude-opus-4-7",
+                               "[OCG]deepseek-v4-pro",
+                               "[特价纯血]claude-opus-4-6",
+                               "[AWSB次]claude-opus-4-7",
+                               "[ais]gemini-3.5-flash",
+                               "[速刷 AWSB次]-claude-opus-4-6",
+                               "[特价]glm-5.1",
+                               "[kiro量高缓]claude-opus-4-6-thinking",
+                               "[高价稳定次kiro]claude-opus-4.6-thinking",
+                               "[ais分流1]gemini-2.5-pro-preview-03-25",
+                               "[MAX次]claude-opus-4-6",
+                               "[网页]deepseek-v4-pro",
+                               "[反重力量]gemini-3.1-pro-high",
+                               "gemini-3.1-flash-image",
+                               "qwen3.7-max",
+                               "[次]grok-4.6",
+                               "[vertex]gemini-3.7-flash",
+                               "[vertex次]gemini-2.5-pro",
+                               "[AWSB]claude-fable-5",
+                               "[0.12]kimi-k3",
+                               "[特价纯血]claude-opus-4-6-thinking",
+                               "[特价]qwen3.7-max",
+                               "[0.2]deepseek-v4.1-flash-expires-on-0910",
+                               "[kiro量高缓]claude-opus-4-7-thinking",
+                               "[反重力次]gemini-3.8-flash-high",
+                               "[ais分流1]gemini-3.8-flash",
+                               "[特价次AG]claude-opus-4-6-thinking",
+                               "[反重力量]gemini-3.8-flash-high",
+                               "[超分4K]gpt-image-2.5-flare",
+                               "[kiro量高缓]claude-opus-4-7",
+                               "[特价]qwen3.8-max",
+                               "doubao-seed-2-0-code-preview-260215",
+                               "[限时免费kiro-free]claude-sonnet-4",
+                               "[MAX-CC]claude-sonnet-5-5",
+                               "[kiro量高缓]claude-sonnet-4-6",
+                               "[自部署]deepseek-v4-flash-0731",
+                               "[0.12]glm-5.3",
+                               "[稳定AG量]claude-opus-4-6-thinking",
+                               "doubao-seed-2-1-turbo-260628",
+                               "[反重力次]gemini-3.7-flash-high",
+                               "[cursor量]claude-opus-4-6",
+                               "[ais]gemini-3.7-flash",
+                               "[AWSB]claude-opus-4-8",
+                               "[MAX-CC]claude-opus-5-5",
+                               "[高价稳定次kiro]claude-opus-5-thinking",
+                               "[MAX-CC]claude-fable-5",
+                               "[外审]glm-5.3-flash",
+                               "[特价]gpt-image-2.5-1k",
+                               "[MAX-CC]claude-sonnet-5",
+                               "[cursor量]claude-opus-4-8",
+                               "[限时免费kiro-free]deepseek-3.2",
+                               "[次AG]claude-opus-4-6-thinking",
+                               "[高价稳定次kiro]claude-opus-5-5-thinking",
+                               "[次cursor]claude-fable-5-1",
+                               "[自部署]deepseek-v4.1-flash",
+                               "[0.12]deepseek-v4-pro-0813",
+                               "[次]deepseek-v4-pro",
+                               "[0.12]deepseek-v4.1-flash-expires-on-0910",
+                               "[特价次AG]claude-opus-4-6",
+                               "[AWSB次]claude-opus-5",
+                               "[MAX次]claude-opus-5",
+                               "[OCG]deepseek-v4-flash",
+                               "[反重力次]gemini-3.5-flash-high",
+                               "[限时]gpt-6-astra",
+                               "[kiro量高缓]claude-opus-5-5",
+                               "[高价稳定次kiro]claude-opus-4-6",
+                               "[kiro量高缓]claude-opus-5",
+                               "[稳定AG量]claude-sonnet-4-6",
+                               "[次AG]claude-opus-4-6",
+                               "[限时免费kiro-free]claude-haiku-4.5",
+                               "[企业次cli]gemini-3.8-flash",
+                               "[企业级]gpt-image-2.5-sunburst",
+                               "gpt-5.6-terra",
+                               "[ais分流1]gemini-3.5-flash",
+                               "nai-diffusion-4-5-full",
+                               "[ais分流1]gemini-2.5-pro-preview-05-06",
+                               "deepseek-v4-flash",
+                               "doubao-seed-2-0-lite-260428",
+                               "[特价纯血]claude-sonnet-4-6-thinking",
+                               "[0.2]kimi-k3",
+                               "[次]glm-5.2",
+                               "[MAX-CC]claude-opus-4-8",
+                               "[AWSB]claude-sonnet-4-6",
+                               "[次]glm-5.3",
+                               "[限时]gpt-6-sol",
+                               "doubao-seed-1-8-251228",
+                               "gpt-image-2.5-sunburst",
+                               "[企业级]gpt-image-2",
+                               "doubao-seed-2-0-mini-260428",
+                               "[MAX-CC]claude-sonnet-4-6",
+                               "[ais]gemini-3.6-flash",
+                               "gemini-3-pro-image",
+                               "[次cursor]claude-opus-4-6",
+                               "[外审]deepseek-v4-flash",
+                               "[次]glm-5.3-flash",
+                               "[kiro量高缓]claude-opus-5-thinking",
+                               "[vertex次]gemini-3.1-pro-preview",
+                               "[企业级4K]gpt-image-2.5-sunburst",
+                               "[外审]glm-5.2",
+                               "[高价稳定次kiro]claude-opus-4-8-thinking",
+                               "[AG量]claude-opus-4-6-thinking",
+                               "nai-diffusion-5-curated",
+                               "[外审]deepseek-v4-pro"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smuu2rvis2l",
+                "name":  "link",
+                "endpoint":  "https://linkapi.ai/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2.5-flare-h",
+                "models":  [
+                               "claude-fable-5",
+                               "claude-fable-5-1",
+                               "claude-haiku-4-5-20251001",
+                               "claude-opus-4-5-20251101",
+                               "claude-opus-4-6",
+                               "claude-opus-4-7",
+                               "claude-opus-4-8",
+                               "claude-opus-5",
+                               "claude-opus-5-5",
+                               "claude-sonnet-4-5-20250929",
+                               "claude-sonnet-4-6",
+                               "claude-sonnet-5",
+                               "claude-sonnet-5-5",
+                               "codex-auto-review",
+                               "gpt-5.5",
+                               "gpt-5.5-openai-compact",
+                               "gpt-5.6-luna",
+                               "gpt-5.6-sol",
+                               "gpt-5.6-sol-openai-compact",
+                               "gpt-5.6-terra",
+                               "gpt-5.6-terra-openai-compact",
+                               "gpt-6-astra",
+                               "gpt-6-sol",
+                               "gpt-6.1-sol",
+                               "gpt-4.1",
+                               "gpt-4.1-mini",
+                               "gpt-4o",
+                               "gpt-4o-mini",
+                               "gpt-5-mini",
+                               "gpt-5.4",
+                               "gpt-5.4-mini",
+                               "o1",
+                               "o3-mini",
+                               "text-embedding-3-large",
+                               "text-embedding-3-small",
+                               "text-embedding-ada-002",
+                               "gpt-5.1",
+                               "gpt-5.2",
+                               "gpt-5.3-codex",
+                               "gpt-6-luna",
+                               "gpt-5.5-pro",
+                               "gemini-2.5-flash",
+                               "gemini-2.5-flash-image",
+                               "gemini-2.5-pro",
+                               "gemini-3-flash-preview",
+                               "gemini-3-pro-image",
+                               "gemini-3-pro-image-preview",
+                               "gemini-3-pro-preview",
+                               "gemini-3.1-flash-image",
+                               "gemini-3.1-flash-image-preview",
+                               "gemini-3.1-flash-lite",
+                               "gemini-3.1-flash-lite-image",
+                               "gemini-3.1-flash-lite-preview",
+                               "gemini-3.1-pro-preview",
+                               "gemini-3.5-flash",
+                               "gemini-3.5-flash-lite",
+                               "gemini-3.6-flash",
+                               "gemini-3.7-flash",
+                               "gemini-3.8-flash",
+                               "gemini-embedding-001",
+                               "gemini-embedding-2-preview",
+                               "claude-haiku-4-5-20251001-r",
+                               "claude-opus-4-6-r",
+                               "claude-opus-4-7-r",
+                               "claude-opus-4-8-r",
+                               "claude-opus-5-5-r",
+                               "claude-opus-5-r",
+                               "claude-sonnet-4-6-r",
+                               "claude-sonnet-5-r",
+                               "gemini-2.5-flash-r",
+                               "gemini-2.5-pro-r",
+                               "gemini-3-flash-preview-r",
+                               "gemini-3-pro-preview-r",
+                               "gemini-3.1-flash-lite-r",
+                               "gemini-3.1-pro-preview-r",
+                               "gemini-3.5-flash-lite-r",
+                               "gemini-3.5-flash-r",
+                               "gemini-3.6-flash-r",
+                               "gemini-3.7-flash-r",
+                               "gemini-3.8-flash-r",
+                               "gemini-3-pro-image-c",
+                               "gemini-3.1-flash-image-c",
+                               "gpt-image-2-c",
+                               "gpt-image-2-h",
+                               "gpt-image-2.5-c",
+                               "gpt-image-2.5-flare-h",
+                               "gpt-image-2.5-sunburst-h",
+                               "[free]deepseek-v4.1-flash",
+                               "[free]kimi-k3",
+                               "[SP]claude-fable-5",
+                               "[SP]claude-fable-5-1",
+                               "[SP]claude-opus-4-6",
+                               "[SP]claude-opus-4-7",
+                               "[SP]claude-opus-4-8",
+                               "[SP]claude-opus-5",
+                               "[SP]claude-opus-5-5",
+                               "[SP]claude-sonnet-4-6",
+                               "[SP]claude-sonnet-5",
+                               "[SP]deepseek-v4-flash",
+                               "[SP]deepseek-v4-pro",
+                               "[SP]deepseek-v4.1-flash",
+                               "[SP]gemini-3.1-pro-preview",
+                               "[次]claude-fable-5",
+                               "[次]claude-fable-5-1",
+                               "[次]claude-opus-4-5",
+                               "[次]claude-opus-4-5-thinking",
+                               "[次]claude-opus-4-6",
+                               "[次]claude-opus-4-6-thinking",
+                               "[次]claude-opus-4-7",
+                               "[次]claude-opus-4-7-thinking",
+                               "[次]claude-opus-4-8",
+                               "[次]claude-opus-5",
+                               "[次]claude-opus-5-5",
+                               "[次]claude-sonnet-4-6",
+                               "[次]claude-sonnet-4-6-thinking",
+                               "[次]claude-sonnet-5",
+                               "[次]deepseek-v4-flash",
+                               "[次]deepseek-v4-pro",
+                               "[次]deepseek-v4.1-flash",
+                               "[次]gemini-2.5-pro",
+                               "[次]gemini-3-flash-preview",
+                               "[次]gemini-3-pro-preview",
+                               "[次]gemini-3.1-pro-preview",
+                               "[次]gemini-3.5-flash",
+                               "[次]gemini-3.6-flash",
+                               "[次]gemini-3.7-flash",
+                               "[次]gemini-3.8-flash",
+                               "[次]glm-5.1",
+                               "[次]glm-5.2",
+                               "[次]glm-5.3",
+                               "[次]glm-5.3-flash",
+                               "[次]grok-4.5",
+                               "[次]grok-4.6",
+                               "[次]grok-4.7",
+                               "grok-4.5",
+                               "grok-4.5-latest",
+                               "grok-4.6",
+                               "grok-4.7",
+                               "grok-composer-2.5-fast",
+                               "grok-4.20-0309-non-reasoning",
+                               "grok-4.20-0309-reasoning",
+                               "grok-4.20-multi-agent-0309",
+                               "grok-4.3",
+                               "grok-build-0.1",
+                               "glm-5.2",
+                               "glm-5.3",
+                               "glm-5.3-flash",
+                               "kimi-k3"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smuws1slbio",
+                "name":  "xxl",
+                "endpoint":  "https://ai.1tim.com/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "gpt-image-2.5-sunburst",
+                "models":  [
+                               "gpt-image-2.5-flare",
+                               "gpt-image-2.5-flare-auto",
+                               "gpt-image-2.5-sunburst"
+                           ],
+                "size":  "1024×1792",
+                "quality":  "max"
+            },
+            {
+                "id":  "smux1tna14q",
+                "name":  "gg",
+                "endpoint":  "https://gcli.ggchan.dev/v1",
+                "key":  "sk-在此填入你的Key",
+                "model":  "agy-gemini-3.1-flash-image",
+                "models":  [
+                               "gemini-2.5-pro",
+                               "gemini-2.5-pro-maxthinking",
+                               "gemini-2.5-pro-nothinking",
+                               "gemini-2.5-pro-search",
+                               "假流式-gemini-2.5-pro",
+                               "假流式-gemini-2.5-pro-maxthinking",
+                               "假流式-gemini-2.5-pro-nothinking",
+                               "假流式-gemini-2.5-pro-search",
+                               "gemini-3.1-pro-preview",
+                               "gemini-3.1-pro-preview-nothinking",
+                               "gemini-3.1-pro-preview-search",
+                               "假流式-gemini-3.1-pro-preview",
+                               "假流式-gemini-3.1-pro-preview-nothinking",
+                               "假流式-gemini-3.1-pro-preview-search",
+                               "gemini-3-flash-preview",
+                               "gemini-3-flash-preview-search",
+                               "假流式-gemini-3-flash-preview",
+                               "假流式-gemini-3-flash-preview-search",
+                               "gemini-3.8-flash",
+                               "gemini-3.8-flash-search",
+                               "假流式-gemini-3.8-flash",
+                               "假流式-gemini-3.8-flash-search",
+                               "gemini-3.1-flash-lite",
+                               "抗截断-gemini-3.8-flash",
+                               "抗截断-gemini-3.1-pro-preview",
+                               "gemini-2.5-pro-cache",
+                               "假流式-gemini-2.5-pro-cache",
+                               "gemini-3.1-pro-preview-cache",
+                               "假流式-gemini-3.1-pro-preview-cache",
+                               "agy-claude-opus-4-6",
+                               "agy-claude-opus-4-6-thinking",
+                               "agy-claude-sonnet-4-6",
+                               "agy-gemini-2.5-flash",
+                               "假流式-agy-gemini-2.5-flash",
+                               "agy-gemini-2.5-flash-lite",
+                               "假流式-agy-gemini-2.5-flash-lite",
+                               "agy-gemini-2.5-flash-thinking",
+                               "假流式-agy-gemini-2.5-flash-thinking",
+                               "agy-gemini-3-flash",
+                               "假流式-agy-gemini-3-flash",
+                               "agy-gemini-3-flash-agent",
+                               "假流式-agy-gemini-3-flash-agent",
+                               "agy-gemini-3.1-flash-image",
+                               "假流式-agy-gemini-3.1-flash-image",
+                               "agy-gemini-3.1-flash-lite",
+                               "假流式-agy-gemini-3.1-flash-lite",
+                               "agy-gemini-3.1-pro-high",
+                               "假流式-agy-gemini-3.1-pro-high",
+                               "agy-gemini-3.1-pro-low",
+                               "假流式-agy-gemini-3.1-pro-low",
+                               "agy-gemini-3.5-flash-extra-low",
+                               "假流式-agy-gemini-3.5-flash-extra-low",
+                               "agy-gemini-3.5-flash-low",
+                               "假流式-agy-gemini-3.5-flash-low",
+                               "agy-gemini-3.6-flash",
+                               "假流式-agy-gemini-3.6-flash",
+                               "agy-gemini-3.6-flash-high",
+                               "假流式-agy-gemini-3.6-flash-high",
+                               "agy-gemini-3.6-flash-medium",
+                               "假流式-agy-gemini-3.6-flash-medium",
+                               "agy-gemini-3.6-flash-low",
+                               "假流式-agy-gemini-3.6-flash-low",
+                               "agy-gemini-3.7-flash",
+                               "假流式-agy-gemini-3.7-flash",
+                               "agy-gemini-3.7-flash-high",
+                               "假流式-agy-gemini-3.7-flash-high",
+                               "agy-gemini-3.7-flash-medium",
+                               "假流式-agy-gemini-3.7-flash-medium",
+                               "agy-gemini-3.7-flash-low",
+                               "假流式-agy-gemini-3.7-flash-low",
+                               "agy-gemini-3.8-flash-high",
+                               "假流式-agy-gemini-3.8-flash-high",
+                               "agy-gemini-3.8-flash-medium",
+                               "假流式-agy-gemini-3.8-flash-medium",
+                               "agy-gemini-3.8-flash-low",
+                               "假流式-agy-gemini-3.8-flash-low",
+                               "agy-gemini-pro-agent",
+                               "假流式-agy-gemini-pro-agent",
+                               "agy-gpt-oss-120b-medium"
+                           ],
+                "size":  "896×1536"
+            }
+        ];
+    const BUILTIN_EXT_PROFILES =
+        {
+            "id":  "smu0ujfttce",
+            "name":  "默认",
+            "models":  [
+                           "gemini-2.5-pro",
+                           "gemini-2.5-pro-maxthinking",
+                           "gemini-2.5-pro-nothinking",
+                           "gemini-2.5-pro-search",
+                           "假流式-gemini-2.5-pro",
+                           "假流式-gemini-2.5-pro-maxthinking",
+                           "假流式-gemini-2.5-pro-nothinking",
+                           "假流式-gemini-2.5-pro-search",
+                           "gemini-3.1-pro-preview",
+                           "gemini-3.1-pro-preview-nothinking",
+                           "gemini-3.1-pro-preview-search",
+                           "假流式-gemini-3.1-pro-preview",
+                           "假流式-gemini-3.1-pro-preview-nothinking",
+                           "假流式-gemini-3.1-pro-preview-search",
+                           "gemini-3-flash-preview",
+                           "gemini-3-flash-preview-search",
+                           "假流式-gemini-3-flash-preview",
+                           "假流式-gemini-3-flash-preview-search",
+                           "gemini-3.8-flash",
+                           "gemini-3.8-flash-search",
+                           "假流式-gemini-3.8-flash",
+                           "假流式-gemini-3.8-flash-search",
+                           "gemini-3.1-flash-lite",
+                           "抗截断-gemini-3.8-flash",
+                           "抗截断-gemini-3.1-pro-preview",
+                           "gemini-2.5-pro-cache",
+                           "假流式-gemini-2.5-pro-cache",
+                           "gemini-3.1-pro-preview-cache",
+                           "假流式-gemini-3.1-pro-preview-cache",
+                           "agy-claude-opus-4-6",
+                           "agy-claude-opus-4-6-thinking",
+                           "agy-claude-sonnet-4-6",
+                           "agy-gemini-2.5-flash",
+                           "假流式-agy-gemini-2.5-flash",
+                           "agy-gemini-2.5-flash-lite",
+                           "假流式-agy-gemini-2.5-flash-lite",
+                           "agy-gemini-2.5-flash-thinking",
+                           "假流式-agy-gemini-2.5-flash-thinking",
+                           "agy-gemini-3-flash",
+                           "假流式-agy-gemini-3-flash",
+                           "agy-gemini-3-flash-agent",
+                           "假流式-agy-gemini-3-flash-agent",
+                           "agy-gemini-3.1-flash-image",
+                           "假流式-agy-gemini-3.1-flash-image",
+                           "agy-gemini-3.1-flash-lite",
+                           "假流式-agy-gemini-3.1-flash-lite",
+                           "agy-gemini-3.1-pro-high",
+                           "假流式-agy-gemini-3.1-pro-high",
+                           "agy-gemini-3.1-pro-low",
+                           "假流式-agy-gemini-3.1-pro-low",
+                           "agy-gemini-3.5-flash-extra-low",
+                           "假流式-agy-gemini-3.5-flash-extra-low",
+                           "agy-gemini-3.5-flash-low",
+                           "假流式-agy-gemini-3.5-flash-low",
+                           "agy-gemini-3.6-flash",
+                           "假流式-agy-gemini-3.6-flash",
+                           "agy-gemini-3.6-flash-high",
+                           "假流式-agy-gemini-3.6-flash-high",
+                           "agy-gemini-3.6-flash-medium",
+                           "假流式-agy-gemini-3.6-flash-medium",
+                           "agy-gemini-3.6-flash-low",
+                           "假流式-agy-gemini-3.6-flash-low",
+                           "agy-gemini-3.7-flash",
+                           "假流式-agy-gemini-3.7-flash",
+                           "agy-gemini-3.7-flash-high",
+                           "假流式-agy-gemini-3.7-flash-high",
+                           "agy-gemini-3.7-flash-medium",
+                           "假流式-agy-gemini-3.7-flash-medium",
+                           "agy-gemini-3.7-flash-low",
+                           "假流式-agy-gemini-3.7-flash-low",
+                           "agy-gemini-3.8-flash-high",
+                           "假流式-agy-gemini-3.8-flash-high",
+                           "agy-gemini-3.8-flash-medium",
+                           "假流式-agy-gemini-3.8-flash-medium",
+                           "agy-gemini-3.8-flash-low",
+                           "假流式-agy-gemini-3.8-flash-low",
+                           "agy-gemini-pro-agent",
+                           "假流式-agy-gemini-pro-agent",
+                           "agy-gpt-oss-120b-medium"
+                       ],
+            "endpoint":  "https://gcli.ggchan.dev/v1",
+            "key":  "sk-在此填入你的Key",
+            "model":  "gemini-3.1-pro-preview"
+        };
 
     let currentDesc = "", currentIdx = -1, processing = false, initialized = false;
     let extAbort = null, genAbort = null, extUserAbort = false;
@@ -172,6 +1289,29 @@
                     { id: "sys_plot", name: "剧情", value: DEFAULT_SYS_PLOT }
                 ]);
             }
+            /* 1.7：首次安装播种内置站点档案（与 Tavo 生图工坊 v1.18.16 同款）；只播一次，已有站点不动，之后完全由用户自管 */
+            if (!st.sdgBuiltinSeeded17) {
+                const seedFlat = function (list, id, flatMap) {
+                    const cur = list.filter(function (p) { return p.id === id; })[0] || list[0];
+                    if (!cur) return;
+                    for (const f in flatMap) st[flatMap[f]] = String(cur[f] == null ? "" : cur[f]);
+                };
+                const genList = safeJson(st.genProfilesJson, null);
+                if (!Array.isArray(genList) || !genList.length) {
+                    st.genProfilesJson = JSON.stringify(BUILTIN_GEN_PROFILES);
+                    st.genProfileId = BUILTIN_GEN_PROFILE_ID;
+                    seedFlat(BUILTIN_GEN_PROFILES, BUILTIN_GEN_PROFILE_ID,
+                        { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize", quality: "genQuality" });
+                }
+                const extList = safeJson(st.extProfilesJson, null);
+                if (!Array.isArray(extList) || !extList.length) {
+                    st.extProfilesJson = JSON.stringify(BUILTIN_EXT_PROFILES);
+                    st.extProfileId = BUILTIN_EXT_PROFILE_ID;
+                    seedFlat(BUILTIN_EXT_PROFILES, BUILTIN_EXT_PROFILE_ID,
+                        { endpoint: "extEndpoint", key: "extKey", model: "extModel" });
+                }
+                st.sdgBuiltinSeeded17 = true;
+            }
         } catch (e) { console.error(LOG, "loadSettings:", e); }
     }
 
@@ -193,7 +1333,7 @@
        ============================================================ */
     const PROF_FIELDS = {
         ext: { endpoint: "extEndpoint", key: "extKey", model: "extModel" },
-        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize" }
+        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize", quality: "genQuality" }
     };
     function profJsonKey(kind) { return kind === "gen" ? "genProfilesJson" : "extProfilesJson"; }
     function profIdKey(kind) { return kind === "gen" ? "genProfileId" : "extProfileId"; }
@@ -255,7 +1395,7 @@
         const name = window.prompt("新站点名字", "站点" + (list.length + 1));
         if (name === null) return;
         const p = { id: newId(), name: String(name).trim() || "站点" + (list.length + 1), endpoint: "", key: "", model: "", models: [] };
-        if (kind === "gen") { p.size = cfg().grokSize || "1024x1024"; }
+        if (kind === "gen") { p.size = cfg().grokSize || "1024x1024"; p.quality = cfg().genQuality || ""; }
         list.push(p);
         saveProfiles(kind, list);
         saveCritical(profIdKey(kind), p.id);
@@ -378,13 +1518,14 @@
         }
         for (const f in P.inputs) { const el = q(P.inputs[f]); if (el) el.value = cfg()[P.fields[f]] || ""; }
     }
-    function presetRowHTML(kind, title) {
+    function presetRowHTML(kind, title, extraBtns) {
         const P = PRESETS[kind], id = P.selId.slice(1);
         return field(title, '<div class="sdg-siterow">' +
             '<select id="' + id + '"></select>' +
             '<button type="button" class="sdg-minibtn sdg-p-add" data-k="' + kind + '" title="新建">＋</button>' +
             '<button type="button" class="sdg-minibtn sdg-p-ren" data-k="' + kind + '" title="改名">✎</button>' +
             '<button type="button" class="sdg-minibtn sdg-p-del" data-k="' + kind + '" title="删除">🗑</button>' +
+            (extraBtns || "") +
         '</div>');
     }
     function bindPresets() {
@@ -401,7 +1542,217 @@
         qa(".sdg-p-add").forEach(function (b) { b.addEventListener("click", function () { addPreset(b.getAttribute("data-k")); }); });
         qa(".sdg-p-ren").forEach(function (b) { b.addEventListener("click", function () { renamePreset(b.getAttribute("data-k")); }); });
         qa(".sdg-p-del").forEach(function (b) { b.addEventListener("click", function () { delPreset(b.getAttribute("data-k")); }); });
+
+        /* 画风 JSON 导入 / 导出；导入同时兼容预设包（模板/规则/系统提示/锚点一起归并） */
+        const btnExp = q("#sdg-style-export"); if (btnExp) btnExp.addEventListener("click", styleExportFile);
+        const btnImp = q("#sdg-style-import"); if (btnImp) btnImp.addEventListener("click", stylePickAndImport);
+        const fileInp = q("#sdg-style-file");
+        if (fileInp) fileInp.addEventListener("change", function (e) {
+            const f = e.target.files && e.target.files[0];
+            if (f) {
+                const reader = new FileReader();
+                reader.onload = function () { try { packImportText(String(reader.result || "")); } catch (err) { setStatus("导入失败：" + (err && err.message || err), C_ERR); } };
+                reader.onerror = function () { setStatus("读文件失败，再试一次", C_ERR); };
+                reader.readAsText(f, "utf-8");
+            }
+            try { e.target.value = ""; } catch (ev) {}
+        });
     }
+
+    /* ============================================================
+       画风预设 JSON 导入 / 导出
+       · 导出：drawgen-style-pack 包，只含画风，不含 API 与密钥
+       · 导入：画风包（styles 数组）按名字合并；
+         预设包（templates 数组 / ipe-image-pack 格式）的模板转画风，
+         规则 / 系统提示 / 角色锚点各自归并；按名字合并不清空现有内容
+       ============================================================ */
+    const STYLE_PACK_FMT = "drawgen-style-pack";
+    const LEGACY_PACK_FMT = "ipe-image-pack";   /* 兼容旧版预设包导出格式的识别标记 */
+    function stylePackBuild() {
+        const styles = getPresets("style").map(function (p) {
+            return { name: p.name || "未命名", fixed: p.fixed || "", postfix: p.postfix || "" };
+        });
+        const d = new Date();
+        const p2 = function (n) { return String(n).padStart(2, "0"); };
+        const stamp = "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+        return { _fmt: STYLE_PACK_FMT, version: VERSION, exportedAt: stamp, styles: styles };
+    }
+    function styleExportFile() {
+        try {
+            const pack = stylePackBuild();
+            const d = new Date();
+            const p2 = function (n) { return String(n).padStart(2, "0"); };
+            const stamp = "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+            const blob = new Blob([JSON.stringify(pack, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = "drawgen-styles-" + stamp + ".json";
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
+            setStatus("已导出画风 JSON ✓ 共 " + pack.styles.length + " 套", C_OK);
+        } catch (e) {
+            setStatus("导出失败：" + (e && e.message || e), C_ERR);
+        }
+    }
+    function stylePickAndImport() { const el = q("#sdg-style-file"); if (el) el.click(); }
+
+    function styleItemFromRaw(raw) {
+        const it = raw || {};
+        const out = { name: String(it.name || it.title || "未命名").trim() || "未命名", fixed: "", postfix: "" };
+        if (it.fixed != null || it.postfix != null) { out.fixed = String(it.fixed || ""); out.postfix = String(it.postfix || ""); return out; }
+        if (it.prefix != null || it.suffix != null) { out.fixed = String(it.prefix || ""); out.postfix = String(it.suffix || ""); return out; }
+        out.postfix = String(it.value != null ? it.value : (it.text != null ? it.text : (it.content != null ? it.content : (it.prompt || ""))));
+        return out;
+    }
+
+    /* 预设包模板：占位符脚手架（Composition: {Camera} …）进前缀，其余风格正文进后缀；
+       旧包写死五标签合同，导入时机械升级为六标签（只动标签枚举） */
+    function packSixTagText(v) {
+        return String(v == null ? "" : v)
+            .replace(/Camera\s*\/\s*Setting\s*\/\s*Mood\s*\/\s*Characters\s*\/\s*Pose/g, "Camera / Setting / Mood / Characters / Outfit / Pose")
+            .replace(/镜头\s*\/\s*环境\s*\/\s*氛围\s*\/\s*人物\s*\/\s*动作/g, "镜头 / 环境 / 氛围 / 人物 / 服装 / 动作")
+            .replace(/\{Camera\}\/\{Setting\}\/\{Mood\}\/\{Characters\}\/\{Pose\}/g, "{Camera}/{Setting}/{Mood}/{Characters}/{Outfit}/{Pose}")
+            .replace(/\{Camera\}\s*\/\s*\{Env\}\s*\/\s*\{Mood\}\s*\/\s*\{Chars\}\s*\/\s*\{Pose\}/g, "{Camera}/{Env}/{Mood}/{Chars}/{Outfit}/{Pose}");
+    }
+    function packTemplateSplit(raw) {
+        let v = packSixTagText(raw);
+        const ph = /\{(?:Camera|Env|Setting|Mood|Chars|Characters|Outfit|Pose|Description)\}/;
+        const lines = v.split(/\r?\n/);
+        let cut = 0;
+        while (cut < lines.length && ph.test(lines[cut])) cut++;
+        const fixed = lines.slice(0, cut).join("\n").trim();
+        const postfix = lines.slice(cut).join("\n").trim();
+        if (fixed && postfix) return { fixed: fixed, postfix: postfix };
+        return { fixed: "", postfix: v.trim() };
+    }
+    function packStyleItem(it) {
+        const c = styleItemFromRaw(it);
+        const sp = packTemplateSplit(it.value != null ? it.value : (it.postfix != null ? it.postfix : ""));
+        if (sp.fixed || sp.postfix) return { name: c.name, fixed: sp.fixed, postfix: sp.postfix };
+        return c;
+    }
+    function packTextItem(it) {
+        const x = it || {};
+        return {
+            name: String(x.name || x.title || "未命名").trim() || "未命名",
+            text: String(x.text != null ? x.text : (x.value != null ? x.value : (x.content != null ? x.content : (x.prompt || ""))))
+        };
+    }
+    function packRuleItem(it) {
+        const c = packTextItem(it);
+        c.text = packSixTagText(c.text);
+        return c;
+    }
+    function packSysItem(it) {
+        const c = packTextItem(it);
+        return { name: c.name, value: packSixTagText(c.text) };
+    }
+
+    /* 解析导入文件并按名字合并；返回 null=没变化，否则 {groups, same} */
+    function packPlan(text) {
+        let parsed;
+        try { parsed = JSON.parse(String(text || "")); } catch (e) { throw new Error("这不是合法 JSON"); }
+        const plan = { styles: [], rules: [], sys: [], anchors: [], kind: "style" };
+        if (parsed && Array.isArray(parsed.styles)) {
+            plan.kind = "style";
+            plan.styles = parsed.styles;
+        } else if (parsed && (parsed._fmt === LEGACY_PACK_FMT || (Array.isArray(parsed.templates) && !Array.isArray(parsed.styles)))) {
+            plan.kind = "pack";
+            plan.styles = parsed.templates || [];
+            plan.rules = parsed.rules || parsed.extractionRules || [];
+            plan.sys = parsed.systemPrompts || parsed.sysPrompts || parsed.prompts || [];
+            plan.anchors = parsed.anchors || parsed.characterAnchors || [];
+        } else if (Array.isArray(parsed)) {
+            plan.kind = "style";
+            plan.styles = parsed;
+        } else if (parsed && (parsed.fixed != null || parsed.postfix != null || parsed.value != null || parsed.text != null)) {
+            plan.kind = "style";
+            plan.styles = [parsed];
+        } else {
+            throw new Error("不是可识别的预设包（画风包需要 styles 数组，预设包需要 templates 数组）");
+        }
+        return plan;
+    }
+    function packImportText(text) {
+        const plan = packPlan(text);
+        /* 合并计划：每组 {label, list(现有), incoming(清洗后), key(名字字段), valueFields}，算出新增/覆盖/相同 */
+        const groups = [];
+        const mkGroup = function (label, current, raw, cleaner, keyField, valueFields, jsonKey, idKey, flatMap) {
+            const inc = (Array.isArray(raw) ? raw : []).map(cleaner).filter(function (x) {
+                return x && String(x[keyField] || "").trim() && valueFields.some(function (f) { return String(x[f] || "").trim(); });
+            });
+            return { label: label, list: current, incoming: inc, key: keyField, fields: valueFields, jsonKey: jsonKey, idKey: idKey, flat: flatMap, add: 0, rep: 0, same: 0 };
+        };
+        groups.push(mkGroup("画风", getPresets("style"), plan.styles, plan.kind === "pack" ? packStyleItem : styleItemFromRaw, "name", ["fixed", "postfix"], PRESETS.style.jsonKey, PRESETS.style.idKey, PRESETS.style.fields));
+        if (plan.kind === "pack") {
+            groups.push(mkGroup("提取规则", getPresets("rules"), plan.rules, packRuleItem, "name", ["text"], PRESETS.rules.jsonKey, PRESETS.rules.idKey, PRESETS.rules.fields));
+            groups.push(mkGroup("系统提示", getSystemPrompts(), plan.sys, packSysItem, "name", ["value"], "extSystemPromptsJson", "extActiveSystemPrompt", null));
+            groups.push(mkGroup("角色锚点", getPresets("anchors"), plan.anchors, packRuleItem, "name", ["text"], PRESETS.anchors.jsonKey, PRESETS.anchors.idKey, PRESETS.anchors.fields));
+        }
+        let totalAdd = 0, totalRep = 0, totalSame = 0;
+        groups.forEach(function (g) {
+            g.incoming.forEach(function (incoming) {
+                const nm = String(incoming[g.key]).trim();
+                const found = g.list.find(function (p) { return String(p[g.key] || "").trim() === nm; });
+                if (!found) { g.add++; return; }
+                const changed = g.fields.some(function (f) { return String(found[f] == null ? "" : found[f]).trim() !== String(incoming[f] == null ? "" : incoming[f]).trim(); });
+                if (changed) g.rep++; else g.same++;
+            });
+            totalAdd += g.add; totalRep += g.rep; totalSame += g.same;
+        });
+        const usable = groups.reduce(function (n, g) { return n + g.incoming.length; }, 0);
+        if (!usable) { setStatus("包里没有可用的预设内容", C_WARN); return; }
+        if (totalAdd === 0 && totalRep === 0) { setStatus("文件里的画风和现有完全一致，什么都没变", C_OK); return; }
+
+        const lines = ["将导入预设包，按名字合并："];
+        groups.forEach(function (g) {
+            if (!g.incoming.length) return;
+            lines.push("· " + g.label + "：新增 " + g.add + " / 覆盖 " + g.rep + (g.same ? " / 相同 " + g.same : ""));
+        });
+        lines.push("同名内容不同的会被覆盖，新增的追加，不会清空现有内容。继续吗？");
+        if (totalAdd > 0 || totalRep > 0) {
+            const msg = totalRep > 0
+                ? ("将覆盖 " + totalRep + " 个同名预设，另新增 " + totalAdd + " 个。继续吗？（取消 = 什么都不动）\n\n" + lines.join("\n"))
+                : lines.join("\n");
+            if (!window.confirm(msg)) { setStatus("已取消导入，什么都没动", C_WARN); return; }
+        }
+
+        /* 落盘合并 */
+        groups.forEach(function (g) {
+            if (!g.incoming.length) return;
+            g.incoming.forEach(function (incoming) {
+                const nm = String(incoming[g.key]).trim();
+                const found = g.list.find(function (p) { return String(p[g.key] || "").trim() === nm; });
+                if (found) {
+                    g.fields.forEach(function (f) { found[f] = incoming[f]; });
+                } else {
+                    const item = { id: newId() };
+                    item[g.key] = nm;
+                    g.fields.forEach(function (f) { item[f] = incoming[f]; });
+                    g.list.push(item);
+                }
+            });
+            saveCritical(g.jsonKey, JSON.stringify(g.list));
+        });
+        /* 刷新界面：画风/规则/锚点走预设行；系统提示重建下拉 */
+        ["style", "rules", "anchors"].forEach(function (k) { try { refreshPresetUI(k); } catch (e) {} });
+        try {
+            const sysSel = q("#sdg-sys-select"), sysVal = q("#sdg-sys-value");
+            if (sysSel) {
+                const curId = cfg().extActiveSystemPrompt;
+                sysSel.innerHTML = getSystemPrompts().map(function (p) {
+                    return '<option value="' + esc(p.id) + '"' + (p.id === curId ? " selected" : "") + '>' + esc(p.name || "未命名") + '</option>';
+                }).join("");
+                if (sysVal) { const p = getSystemPrompts().find(function (x) { return x.id === sysSel.value; }); sysVal.value = p ? p.value : ""; }
+            }
+        } catch (e) {}
+        const summary = groups.filter(function (g) { return g.incoming.length; }).map(function (g) {
+            return g.label + " 新增" + g.add + "/覆盖" + g.rep;
+        }).join("，");
+        setStatus("导入完成 ✓ " + summary, C_OK);
+        toast("✅ 导入完成：" + summary, true);
+    }
+
     /* 兼容旧名 */
     function getStyles() { return getPresets("style"); }
     function activeStyle() { return activePreset("style"); }
@@ -1171,18 +2522,20 @@
         const url = base + "/images/edits";
         const prompt = finalPrompt + "\n\n（输入图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）";
         const rawB64 = String(faceRef).replace(/^data:[^,]+,/, "");
-        const size = String(c.grokSize || "1024x1024");
-        const signal = genAbort ? genAbort.signal : undefined;
+        const size = normalizeGenSize(c.grokSize);
+        const quality = String(c.genQuality || "").trim();
+        const ctl = createGenController();
+        const signal = ctl.signal;
         const errs = [];
         async function parseResp(resp, tag) {
             const text = await resp.text();
-            if (!resp.ok) throw new Error(tag + " " + resp.status + ": " + text.slice(0, 150));
+            if (!resp.ok) throw new Error(tag + " " + siteErrorBrief(resp.status, text));
             let result;
             try { result = JSON.parse(text); } catch (e) { throw new Error(tag + " 响应不是 JSON: " + text.slice(0, 120)); }
             const item = result && result.data && result.data[0];
             if (!item) throw new Error(tag + " 响应缺少 data[0]: " + text.slice(0, 150));
             if (item.b64_json) return "data:image/png;base64," + item.b64_json;
-            if (item.url) return await dataUrlFromUrl(item.url);
+            if (item.url) return await normalizeImageToDataUrl(item.url);
             throw new Error(tag + " 响应未包含图片");
         }
         function multipartBody(pngDataUrl, mime, filename) {
@@ -1196,6 +2549,7 @@
             fd.append("image", file);
             fd.append("n", "1");
             fd.append("size", size);
+            if (quality) fd.append("quality", quality);
             return fd;
         }
         const toPng = function (dataUrl) {
@@ -1212,94 +2566,270 @@
             });
         };
         const pngRef = await toPng(faceRef);
+        const jsonExtra = quality ? { quality: quality } : {};
         const attempts = [
             ["multipart-PNG", { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: multipartBody(pngRef, "image/png", "face.png"), signal }],
             ["multipart-JPEG", { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: multipartBody(faceRef, "image/jpeg", "face.jpg"), signal }],
-            ["JSON/dataURL", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify({ model: c.genModel, prompt: prompt, image: faceRef, n: 1, size: size }), signal }],
-            ["JSON/base64", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify({ model: c.genModel, prompt: prompt, image: rawB64, n: 1, size: size }), signal }]
+            ["JSON/dataURL", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify(Object.assign({ model: c.genModel, prompt: prompt, image: faceRef, n: 1, size: size }, jsonExtra)), signal }],
+            ["JSON/base64", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify(Object.assign({ model: c.genModel, prompt: prompt, image: rawB64, n: 1, size: size }, jsonExtra)), signal }]
         ];
-        for (let i = 0; i < attempts.length; i++) {
-            const tag = attempts[i][0];
-            try {
-                return await parseResp(await fetch(url, attempts[i][1]), tag);
-            } catch (e) {
-                if (e.name === "AbortError") throw e;
-                errs.push("[" + tag + "] " + String(e.message || e).slice(0, 110));
-                log("编辑接口形状 " + tag + " 失败:", String(e.message || e).slice(0, 200));
+        try {
+            for (let i = 0; i < attempts.length; i++) {
+                const tag = attempts[i][0];
+                try {
+                    return await parseResp(await fetch(url, attempts[i][1]), tag);
+                } catch (e) {
+                    const ae = genAbortError(ctl); if (ae) throw ae;
+                    errs.push("[" + tag + "] " + String(e.message || e).slice(0, 110));
+                    log("编辑接口形状 " + tag + " 失败:", String(e.message || e).slice(0, 200));
+                }
             }
+            throw new Error("编辑接口四种形状均失败 → " + errs.join(" ｜ "));
+        } finally {
+            ctl.dispose();
         }
-        throw new Error("编辑接口四种形状均失败 → " + errs.join(" ｜ "));
     }
 
-    /* —— 生图：中转站 chat/completions 多模态 —— */
-    async function genGemini(finalPrompt) {
+    /* —— 生图统一请求（与 Tavo 生图工坊 v1.18.16 对齐） ——
+       ① 主路径 chat/completions 多模态（尺寸 / 画质原样传）；地址直指 /images/generations 时跳过；
+       ② 兜底 images/generations（b64_json，站点只认 url 即 400 提 response_format 时自动改发 url 重试一次）；
+       ③ 尺寸全角 × 归一化为半角 x（fate 等站点拒收全角）；
+       ④ genTimeout 超时与「停止」按钮真正能掐断；超时/取消后不再补发，避免重复计费；
+       ⑤ 失败错误带 HTTP 状态码 + 站点返回的原话。
+       酒馆后端代理（genProxy）只走 chat 通道，没有 images 兜底。 */
+    function normalizeGenSize(v) { return String(v == null ? "" : v).trim().replace(/×/g, "x") || "1024x1024"; }
+
+    /* 组合「停止」按钮信号与超时信号为一个 AbortController */
+    function createGenController() {
+        let timedOut = false, userAborted = false;
+        const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+        const timeoutMs = Math.max(30, Number(cfg().genTimeout) || 300) * 1000;
+        const timer = ctrl ? setTimeout(function () { timedOut = true; try { ctrl.abort(); } catch (e) {} }, timeoutMs) : null;
+        let onExt = null;
+        if (ctrl && genAbort && genAbort.signal) {
+            const ext = genAbort.signal;
+            onExt = function () { userAborted = true; try { ctrl.abort(); } catch (e) {} };
+            if (ext.aborted) onExt();
+            else try { ext.addEventListener("abort", onExt); } catch (e) {}
+        }
+        return {
+            signal: ctrl ? ctrl.signal : (genAbort ? genAbort.signal : undefined),
+            timeoutSec: Math.round(timeoutMs / 1000),
+            isTimedOut: function () { return timedOut; },
+            isUserAborted: function () { return userAborted; },
+            dispose: function () { if (timer) clearTimeout(timer); if (onExt && genAbort) try { genAbort.signal.removeEventListener("abort", onExt); } catch (e) {} }
+        };
+    }
+    function genAbortError(ctl) {
+        if (ctl.isTimedOut()) return new Error("生图请求超时（" + ctl.timeoutSec + " 秒），已停止（不自动重试，以免重复扣费）");
+        if (ctl.isUserAborted()) return new Error("已取消生图");
+        return null;
+    }
+
+    /* 从站点错误体里抠出 {error:{message,code}} 一类原话；错误体可能被拼在长串中间，先抠第一个完整 {…} */
+    function pickJsonBlock(text) {
+        const t = String(text == null ? "" : text);
+        const i = t.indexOf("{");
+        if (i < 0) return null;
+        let depth = 0, inStr = false, esc = false;
+        for (let k = i; k < t.length; k++) {
+            const ch = t.charAt(k);
+            if (inStr) {
+                if (esc) esc = false;
+                else if (ch === "\\") esc = true;
+                else if (ch === '"') inStr = false;
+                continue;
+            }
+            if (ch === '"') inStr = true;
+            else if (ch === "{") depth++;
+            else if (ch === "}") { depth--; if (depth === 0) { try { return JSON.parse(t.slice(i, k + 1)); } catch (e) { return null; } } }
+        }
+        return null;
+    }
+    function siteErrorBrief(status, body) {
+        const d = (function () { try { return JSON.parse(String(body || "")); } catch (e) { return pickJsonBlock(body); } })();
+        let detail = "";
+        if (d) {
+            const err = d.error || d;
+            const msg = err.message || err.msg || err.detail || d.message;
+            const code = err.code || err.type;
+            detail = [msg, (code && String(code) !== String(msg)) ? "(" + code + ")" : ""].filter(Boolean).join(" ");
+        }
+        if (!detail) detail = String(body == null ? "" : body).replace(/\s+/g, " ").trim();
+        return "HTTP " + status + "：" + (String(detail || "").slice(0, 140) || "站点未返回原因");
+    }
+    function siteErrorText(status, body) { return "生图失败 " + siteErrorBrief(status, body); }
+    /* 统一出口：超时/取消原样，HTTP 错误转「状态码 + 站点原话」，其余保留 */
+    function formatGenError(e) {
+        const raw = String((e && e.message) || e || "");
+        if (/超时/.test(raw)) return raw;
+        if (/已取消/.test(raw) || (e && e.name === "AbortError")) return "已取消生图";
+        const m = raw.match(/HTTP\s*(\d{3})/);
+        if (m) {
+            const body = raw.split(/HTTP\s*\d{3}\s*[:：]?/).filter(Boolean).join(" / ");
+            const d = (function () { try { return JSON.parse(body); } catch (e2) { return pickJsonBlock(body); } })();
+            let detail = "";
+            if (d) {
+                const err = d.error || d;
+                const msg = err.message || err.msg || err.detail || d.message;
+                const code = err.code || err.type;
+                detail = [msg, (code && String(code) !== String(msg)) ? "(" + code + ")" : ""].filter(Boolean).join(" ");
+            }
+            if (!detail) detail = String(body || "").replace(/\s+/g, " ").trim();
+            return "生图失败 " + m[1] + "：" + (String(detail || "").slice(0, 140) || "站点未返回原因");
+        }
+        return raw;
+    }
+
+    /* 纯解析：从 chat/completions 响应里取图片 URL / dataURL（不下载） */
+    function imgUrlFromChat(result) {
+        const ch = result && result.choices && result.choices[0];
+        const m2 = ch && ch.message;
+        if (!m2) return "";
+        const rd = m2.reasoning_details;
+        if (rd && Array.isArray(rd.images) && rd.images[0] && rd.images[0].image_url) {
+            const iu = rd.images[0].image_url;
+            return typeof iu === "string" ? iu : (iu.url || "");
+        }
+        if (Array.isArray(m2.content)) {
+            for (const it of m2.content) {
+                if (it && it.type === "image_url" && it.image_url) return typeof it.image_url === "string" ? it.image_url : (it.image_url.url || "");
+            }
+        }
+        if (typeof m2.content === "string") {
+            const mm = m2.content.match(/!\[.*?\]\(((?:https?:\/\/|data:image\/[^;]+;base64,)[^\s\)]+)\)/);
+            if (mm) return mm[1];
+        }
+        return "";
+    }
+    function imgUrlFromGen(result) {
+        const item = result && result.data && result.data[0];
+        if (!item) return "";
+        if (item.b64_json) return "data:image/png;base64," + item.b64_json;
+        if (item.url) return String(item.url);
+        return "";
+    }
+
+    async function genImageUnified(finalPrompt) {
         const c = cfg();
+        if (!c.genModel) throw new Error("请先填写生图模型");
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
         if (!base) throw new Error("请先填写生图 API 地址");
-        if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
-        const url = base + "/chat/completions";
-        const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
-        const parts = [];
-        if (faceRef) parts.push({ type: "image_url", image_url: { url: faceRef } });
-        parts.push({ type: "text", text: faceRef
-            ? finalPrompt + "\n\n（第一张图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）"
-            : finalPrompt });
-        const messages = [{ role: "user", content: parts }];
-        const payload = { model: c.genModel, messages: messages, size: String(c.grokSize || "1024x1024") };
-        log("Gemini 请求:", url);
+        const imagesOnly = /\/images\/generations$/.test(base);   /* 地址直指 images 接口：直连，不再先白打一次 chat */
+        base = base.replace(/\/(images\/generations|chat\/completions)$/, "");
+        const size = normalizeGenSize(c.grokSize);
+        const quality = String(c.genQuality || "").trim();       /* GPT 2.5 low~max；Grok low/medium/auto；留空不发送 */
+        log("生图请求：", base.replace(/^https?:\/\//, ""), "model=" + c.genModel, "size=" + size, "q=" + (quality || "-"));
 
-        let requestUrl = url, requestHeaders, requestBody = payload;
+        const faceRef = (c.faceRefOn && String(c.faceRef || "")) ? String(c.faceRef) : "";
+        const ctl = createGenController();
+
+        /* ① 主路径：chat/completions */
+        let lastErr = "";
+        if (imagesOnly) {
+            lastErr = "按地址直连 images 接口";
+        } else if (c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
+            /* 酒馆后端代理通道：仅 chat，无 images 兜底；请求体保持后端约定原样 */
+            const parts = [];
+            if (faceRef) parts.push({ type: "image_url", image_url: { url: faceRef } });
+            parts.push({ type: "text", text: faceRef
+                ? finalPrompt + "\n\n（第一张图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）"
+                : finalPrompt });
+            const messages = [{ role: "user", content: parts }];
+            try {
+                const resp = await fetch("/api/backends/chat-completions/generate", {
+                    method: "POST", headers: ctx().getRequestHeaders(), signal: ctl.signal,
+                    body: JSON.stringify({
+                        chat_completion_source: "custom",
+                        custom_url: base,
+                        custom_include_headers: "Authorization: \"Bearer " + (c.genKey || "") + "\"",
+                        model: c.genModel,
+                        messages: messages,
+                        stream: false
+                    })
+                });
+                if (resp.ok) {
+                    const result = await readOpenAIResponse(resp);
+                    const u = imgUrlFromChat(result);
+                    if (u) { ctl.dispose(); return { image: await normalizeImageToDataUrl(u), prompt: finalPrompt, via: "proxy" }; }
+                    lastErr = "代理 chat 接口响应中没有图片";
+                } else {
+                    const t = await resp.text();
+                    lastErr = "代理 chat 接口 " + siteErrorBrief(resp.status, t);
+                }
+            } catch (e) {
+                const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
+                lastErr = "代理 chat 接口网络错误: " + (e && e.message || e);
+            }
+        } else try {
+            const headers = { "Content-Type": "application/json", "Accept": "*/*" };
+            if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
+            const parts = [];
+            if (faceRef) parts.push({ type: "image_url", image_url: { url: faceRef } });
+            parts.push({ type: "text", text: faceRef
+                ? finalPrompt + "\n\n（第一张图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）"
+                : finalPrompt });
+            const resp = await fetch(base + "/chat/completions", {
+                method: "POST", headers: headers, signal: ctl.signal,
+                body: JSON.stringify({ model: c.genModel, messages: [{ role: "user", content: parts }], size: size, quality: quality || undefined })
+            });
+            if (resp.ok) {
+                const result = await readOpenAIResponse(resp);
+                const u = imgUrlFromChat(result);
+                if (u) { ctl.dispose(); return { image: await normalizeImageToDataUrl(u), prompt: finalPrompt, via: "chat" }; }
+                lastErr = "chat 接口响应中没有图片";
+            } else {
+                const t = await resp.text();
+                lastErr = "chat 接口 " + siteErrorBrief(resp.status, t);
+            }
+        } catch (e) {
+            const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
+            lastErr = "chat 接口网络错误: " + (e && e.message || e);
+        }
+
+        /* ② 兜底：images/generations（后端代理通道没有这一兜底） */
         if (c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
-            requestUrl = "/api/backends/chat-completions/generate";
-            requestHeaders = ctx().getRequestHeaders();
-            requestBody = {
-                chat_completion_source: "custom",
-                custom_url: base,
-                custom_include_headers: "Authorization: \"Bearer " + (c.genKey || "") + "\"",
-                model: c.genModel,
-                messages: messages,
-                stream: false
-            };
-        } else {
-            requestHeaders = directHeaders("application/json", "Bearer " + (c.genKey || ""));
+            ctl.dispose();
+            throw new Error(lastErr || "chat 接口生图失败");
         }
-
-        const signal = genAbort ? genAbort.signal : undefined;
-        const resp = await fetch(requestUrl, { method: "POST", headers: requestHeaders, body: JSON.stringify(requestBody), signal });
-        if (!resp.ok) {
-            const errorText = await resp.text();
-            throw new Error("API request failed with status " + resp.status + ": " + errorText);
+        try {
+            const headers = { "Content-Type": "application/json", "Accept": "*/*" };
+            if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
+            let resp2 = await fetch(base + "/images/generations", {
+                method: "POST", headers: headers, signal: ctl.signal,
+                body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "b64_json" })
+            });
+            let why2 = "";
+            if (!resp2.ok) why2 = await resp2.text();
+            /* fate 类站点：b64_json 一律 400「仅支持 url」（未计费）→ 改发 url 重试一次 */
+            if (resp2.status === 400 && /response_format/i.test(why2)) {
+                log("站点要求 response_format=url，改用 url 重试");
+                resp2 = await fetch(base + "/images/generations", {
+                    method: "POST", headers: headers, signal: ctl.signal,
+                    body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "url" })
+                });
+                why2 = resp2.ok ? "" : await resp2.text();   /* body 只能读一次，重试后立刻读走 */
+            }
+            if (resp2.ok) {
+                const result2 = await readOpenAIResponse(resp2);
+                const u2 = imgUrlFromGen(result2);
+                if (u2) { ctl.dispose(); return { image: await normalizeImageToDataUrl(u2), prompt: finalPrompt, via: "generations" }; }
+                ctl.dispose();
+                throw new Error("images 接口响应未包含图片 / " + lastErr);
+            }
+            ctl.dispose();
+            throw new Error(siteErrorText(resp2.status, why2) + " / " + lastErr);
+        } catch (e) {
+            ctl.dispose();
+            const ae = genAbortError(ctl); if (ae) throw ae;
+            throw e;
         }
-        const result = await readOpenAIResponse(resp);
-        return await extractImageFromChatResponse(result);
     }
 
     async function extractImageFromChatResponse(result) {
-        const choices = result && result.choices;
-        if (choices && choices.length > 0) {
-            const content = choices[0].message && choices[0].message.content;
-            const reasoningDetails = choices[0].message && choices[0].message.reasoning_details;
-            if (reasoningDetails && Array.isArray(reasoningDetails.images) && reasoningDetails.images.length > 0) {
-                const firstImage = reasoningDetails.images[0];
-                if (firstImage && firstImage.type === "image_url" && firstImage.image_url) {
-                    const u = typeof firstImage.image_url === "string" ? firstImage.image_url : firstImage.image_url.url;
-                    if (u) return await normalizeImageToDataUrl(u);
-                }
-            }
-            if (Array.isArray(content)) {
-                for (const item of content) {
-                    if (item && item.type === "image_url" && item.image_url) {
-                        const u = typeof item.image_url === "string" ? item.image_url : item.image_url.url;
-                        if (u) return await normalizeImageToDataUrl(u);
-                    }
-                }
-            } else if (typeof content === "string") {
-                const markdownImageRegex = /!\[.*?\]\(((?:https?:\/\/|data:image\/[^;]+;base64,)[^\s\)]+)\)/;
-                const match = content.match(markdownImageRegex);
-                if (match && match[1]) return await normalizeImageToDataUrl(match[1]);
-                log("响应只有文本，没有图片");
-            }
-        }
+        const u = imgUrlFromChat(result);
+        if (u) return await normalizeImageToDataUrl(u);
+        log("响应中没有图片");
         throw new Error("API 响应中没有找到图片");
     }
     async function normalizeImageToDataUrl(u) {
@@ -1336,17 +2866,41 @@
         } catch (e) { log("图片上传异常，保留内嵌存储:", e && e.message); return imageUrl; }
     }
 
-    async function generateImage(desc) {
+    /* 画风段处理：分层生图时把前缀脚手架里的 {Camera}/{Env}/{Mood}/{Chars}/{Outfit}/{Pose}
+       填成当楼层的值（预设包导入的画风前缀就是这种结构）；非分层或仍有未填占位符时整段跳过，
+       绝不把 {Camera} 之类的字面占位符发给站点。 */
+    function styleSegment(seg, layers) {
+        let t = String(seg == null ? "" : seg);
+        if (!t) return "";
+        if (layers && anyLayer(layers)) {
+            const map = { "{Camera}": layers.camera, "{Env}": layers.env, "{Mood}": layers.mood, "{Chars}": layers.chars, "{Outfit}": layers.outfit, "{Pose}": layers.pose, "{Description}": "" };
+            let hadPh = false;
+            TPL_PH_RE.lastIndex = 0;
+            t = t.replace(TPL_PH_RE, function (m) { hadPh = true; return String(map[m] == null ? "" : map[m]); });
+            if (hadPh) {
+                /* 空层值会留下 "Composition: | Setting: |" 空壳，清掉空段 */
+                t = t.split(/[|\n]/).map(function (x) { return x.trim(); }).filter(function (x) {
+                    const ci = x.indexOf(":");
+                    return ci < 0 || x.slice(ci + 1).trim() !== "";
+                }).join(" | ");
+            }
+        }
+        TPL_PH_RE.lastIndex = 0;
+        if (TPL_PH_RE.test(t)) return "";
+        return t.trim();
+    }
+
+    async function generateImage(desc, layers) {
         const c = cfg();
         if (!c.genModel) throw new Error("请先填写生图模型");
-        const finalPrompt = [c.genFixedPrompt, String(desc || "").trim(), c.genPostfixPrompt].filter(Boolean).join(", ");
+        const finalPrompt = [styleSegment(c.genFixedPrompt, layers), String(desc || "").trim(), styleSegment(c.genPostfixPrompt, layers)].filter(Boolean).join(", ");
         if (!finalPrompt) throw new Error("没有可用的生图提示词");
         log("生图最终提示词:", finalPrompt.slice(0, 200));
 
         if (typeof AbortController !== "undefined") genAbort = new AbortController();
         try {
             const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
-            let imageUrl = (faceRef && String(cfg().faceRefMode) === "edits") ? await genEdits(finalPrompt, faceRef) : await genGemini(finalPrompt);
+            let imageUrl = (faceRef && String(cfg().faceRefMode) === "edits") ? await genEdits(finalPrompt, faceRef) : (await genImageUnified(finalPrompt)).image;
             if ((c.convertToJpeg === true || String(c.convertToJpeg) === "true") && String(imageUrl).startsWith("data:image/")) {
                 try { imageUrl = await convertImageToJpeg(imageUrl); } catch (eJ) { log("转 JPEG 失败，保留原图:", eJ.message); }
             }
@@ -1878,7 +3432,7 @@
                     } catch (eInj) { log("自动注入失败:", eInj.message); }
                 }
                 if (cfg().autoGenerate && cfg().enabled) {
-                    await generateForFloor(targetIdx, desc);
+                    await generateForFloor(targetIdx, desc, undefined, layers);
                 }
             }
         } catch (e) {
@@ -1899,13 +3453,15 @@
     }
 
     /* 给某楼的某个标记槽生图；slot 缺省 = 最后一个标记；正文没标记时 desc 必填，图挂在楼尾 */
-    async function generateForFloor(idx, desc, slot) {
+    async function generateForFloor(idx, desc, slot, layers) {
         const msg = (ctx().chat || [])[idx];
         const tags = msg ? findAllTags(msg.mes) : [];
         if (typeof slot !== "number" || slot < 0) slot = tags.length ? tags.length - 1 : 0;
         desc = String(desc || "").trim();
+        const rec = msg ? injectRecord(msg) : null;
         if (!desc && tags[slot]) desc = tags[slot].inner;
-        if (!desc && msg) { const rec = injectRecord(msg); if (rec) desc = rec.desc; }
+        if (!desc && rec) desc = rec.desc;
+        if (!layers && rec) layers = rec.layers;
         if (!desc) throw new Error("没有可用的生图描述");
         if (idx >= 0) currentIdx = idx;
 
@@ -1916,10 +3472,10 @@
         setStatus("正在生图…", C_OK);
         const t0 = Date.now();
         try {
-            const { image } = await generateImage(desc);
+            const { image } = await generateImage(desc, layers);
             if (msg) {
                 setImage(msg, slot, image);
-                if (!injectRecord(msg)) rememberInject(msg, buildInjectTag(desc, null), desc, null);
+                if (!injectRecord(msg)) rememberInject(msg, buildInjectTag(desc, null), desc, layers || null);
                 try { if (typeof ctx().saveChat === "function") ctx().saveChat(); } catch (eS) {}
             }
             const dur = ((Date.now() - t0) / 1000).toFixed(1);
@@ -1928,9 +3484,9 @@
             return image;
         } catch (e) {
             console.error(LOG, e);
-            const m = e && e.message || String(e);
-            setStatus("生图失败: " + m, C_ERR);
-            toast("生图失败：" + m, false);
+            const m = formatGenError(e);
+            setStatus(m, C_ERR);
+            toast(m, false);
             throw e;
         } finally {
             delete genBusy[key];
@@ -2114,7 +3670,7 @@
         try {
             let idx = currentIdx;
             if (idx < 0) idx = lastAiIdx();
-            await generateForFloor(idx, desc);
+            await generateForFloor(idx, desc, undefined, activeLayersForInject());
         } catch (e) { /* 已提示 */ }
     }
     async function onRegenFloor(idx) {
@@ -2379,6 +3935,15 @@
                     field("API Key", textInput("sdg-gen-key", "genKey", "", "password")) +
                     modelRowHTML("gen") +
                     field("尺寸", textInput("sdg-grok-size", "grokSize", "1024x1024")) +
+                    field("画质 quality", '<select id="sdg-gen-quality">' +
+                        '<option value=""' + (!cfg().genQuality ? " selected" : "") + '>（不发送，站点默认）</option>' +
+                        '<option value="low"' + (cfg().genQuality === "low" ? " selected" : "") + '>low</option>' +
+                        '<option value="medium"' + (cfg().genQuality === "medium" ? " selected" : "") + '>medium</option>' +
+                        '<option value="high"' + (cfg().genQuality === "high" ? " selected" : "") + '>high</option>' +
+                        '<option value="xhigh"' + (cfg().genQuality === "xhigh" ? " selected" : "") + '>xhigh</option>' +
+                        '<option value="max"' + (cfg().genQuality === "max" ? " selected" : "") + '>max</option>' +
+                        '<option value="auto"' + (cfg().genQuality === "auto" ? " selected" : "") + '>auto（Grok）</option>' +
+                    '</select><div class="sdg-hint">GPT 2.5 系：low/medium/high/xhigh/max；Grok：low/medium/auto；随站点档案保存</div>') +
                     field("脸部参考图", '<button type="button" id="sdg-face-pick" class="sdg-minibtn" style="width:100%;padding:8px 0;font-size:13px">📁 选择 / 更换参考图</button>' +
                         '<input type="file" id="sdg-face-file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px">' +
                         '<img id="sdg-face-thumb" alt=""' + (cfg().faceRef ? ' src="' + cfg().faceRef + '" style="display:block !important;height:110px !important;width:auto !important;max-width:100% !important;margin:5px 0 0 0 !important;border-radius:6px !important"' : ' style="display:none !important"') + '>' +
@@ -2401,7 +3966,9 @@
                     '<div class="sdg-grid2">' +
                         field("延迟（毫秒）", textInput("sdg-delay", "autoDelay", "", "number")) +
                         field("图片宽度（%）", textInput("sdg-imgw", "imageMaxWidth", "", "number")) +
+                        field("生图超时（秒）", textInput("sdg-gen-timeout", "genTimeout", "300", "number")) +
                     '</div>' +
+                    '<div class="sdg-hint">生图超过该秒数自动停止且不补发（避免重复扣费）；「停止」按钮同样立即掐断</div>' +
 
                     '<h5>插件</h5>' +
                     chk("sdg-enabled", "enabled", "启用生图工坊") +
@@ -2427,10 +3994,13 @@
 
                     /* —— 画风：跟提取规则分开的独立分区，可存多个 —— */
                     '<h5>🎨 画风（管生图风格）</h5>' +
-                    presetRowHTML("style", "画风预设") +
+                    presetRowHTML("style", "画风预设",
+                        '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风包 / 预设包）">⬆</button>' +
+                        '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风 JSON">⬇</button>' +
+                        '<input type="file" id="sdg-style-file" accept=".json,application/json" style="position:absolute;left:-9999px;width:1px;height:1px">') +
                     bigField("sdg-gen-fixed", "genFixedPrompt", 3, "例：Korean semi-realistic anime, ultra-detailed digital painting…", "风格词（拼在描述前）") +
                     bigField("sdg-gen-postfix", "genPostfixPrompt", 2, "例：masterpiece, best quality", "后缀词（拼在描述后）") +
-                    '<div class="sdg-hint">画风只影响出图风格，不会发给副AI；跟下面的「提取规则」是两回事</div>' +
+                    '<div class="sdg-hint">画风只影响出图风格，不会发给副AI；跟下面的「提取规则」是两回事。预设行 ⬆ 导入 JSON（画风包 / 预设包）、⬇ 导出画风 JSON，可备份或分享画风（导出只含画风，不含 API 与密钥）</div>' +
 
                     '<h5>📝 提取规则（管副AI怎么写描述）</h5>' +
                     siteRowHTML("ext") +
@@ -2592,6 +4162,7 @@
         bindChk("#sdg-show-img", "showImage", function (v) { document.body.classList.toggle("sdg-hide-images", !v); });
         q("#sdg-delay").addEventListener("change", function (ev) { save("autoDelay", Number(ev.target.value) || 1800); });
         q("#sdg-imgw").addEventListener("change", function (ev) { save("imageMaxWidth", Number(ev.target.value) || 60); applyImageWidth(); });
+        q("#sdg-gen-timeout").addEventListener("change", function (ev) { save("genTimeout", Math.max(30, Number(ev.target.value) || 300)); });
         bindChk("#sdg-enabled", "enabled", function () { syncDrawer(); });
         bindChk("#sdg-show-ball", "showBall", function () { applyBallVisible(); syncDrawer(); });
 
@@ -2656,7 +4227,10 @@
 
         on(pre + "-endpoint", "change", function (e) { saveProfileField(kind, "endpoint", e.target.value); });
         on(pre + "-key", "change", function (e) { saveProfileField(kind, "key", e.target.value); });
-        if (kind === "gen") on("#sdg-grok-size", "change", function (e) { saveProfileField("gen", "size", e.target.value); });
+        if (kind === "gen") {
+            on("#sdg-grok-size", "change", function (e) { saveProfileField("gen", "size", e.target.value); });
+            on("#sdg-gen-quality", "change", function (e) { saveProfileField("gen", "quality", e.target.value); });
+        }
 
         /* 模型：下拉选中就存；✎ 切换手动输入框 */
         on(pre + "-model-sel", "change", function (e) {
@@ -2699,6 +4273,7 @@
         const mi = q(pre + "-model"); if (mi) mi.value = c[kind === "gen" ? "genModel" : "extModel"] || "";
         if (kind === "gen") {
             const sz = q("#sdg-grok-size"); if (sz) sz.value = c.grokSize || "1024x1024";
+            const ql = q("#sdg-gen-quality"); if (ql) ql.value = c.genQuality || "";
         }
         renderModelSelect(kind);
     }
@@ -2781,7 +4356,7 @@
             await generateImage("a simple red apple on a white table");
             setStatus("生图连接成功 ✓（已成功生成一张测试图）", C_OK);
         } catch (e) {
-            setStatus("生图连接失败：" + (e && e.message || e), C_ERR);
+            setStatus("生图连接失败：" + formatGenError(e), C_ERR);
         }
     }
 
@@ -2915,7 +4490,9 @@
             buildInjectTag, fillTemplate, stripImageTag, findTagInText, findAllTags, tagInner, templateEnvelope, markerPairs,
             parseLayers, mergeLayers, joinLayers, layerContract, isNoChange,
             injectDescToMessage, reinjectDescToMessage, renderFloorImage, renderAllImages,
-            getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom
+            getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
+            normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
+            imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts
         };
     }
 
