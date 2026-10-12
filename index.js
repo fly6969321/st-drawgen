@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.7.3
+ *  生图工坊 · DrawGen v1.8.0
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -17,14 +17,25 @@
  *  · v1.7.1 面板纵向压缩；自动提取固定等待 1800→800ms（未自定义过的老配置自动迁移，下限 100ms）；
  *    提取请求不再把本插件注入的生图块和内嵌 base64 图发给副AI（少烧 prefill）；忙等轮询 1200→300ms；
  *    修复 v1.7.0 内置提取站点因结构问题未真正播种的问题
- *  · v1.7.3 手机端面板整体变矮 60px（上边缘下移 30px、下边缘上移 30px）；
- *    修「延迟 / 图片宽度」两个输入框不齐（长标签换行把左边输入框顶下去）——格子改底边对齐，长标签收短
+ *  · v1.8.0 稳定性与提速（按酒馆机制排查）：
+ *    落盘 —— 注入记录和图库同步进 msg.swipe_info[swipe_id].extra（酒馆切 swipe 会用它覆盖 msg.extra，
+ *      之前切走再切回来记录和图整体被抹掉）；saveChat 统一走 persistChat（await + 同帧合并 + 失败提示）；
+ *      生图期间切回复/删楼不再把图归错人或写进孤儿楼
+ *    标记 —— image###…### 识别放宽：井号写多写少、全角＃、大小写都认；
+ *      漏写闭合时不再把下一个标记吞掉（内层禁止再出现前缀）
+ *    提速 —— 生图移出提取锁（之前下一楼提取要干等整张图生完，且生图失败会误触发提取重试）；
+ *      提取请求封顶 max_tokens；正文上限 9000→4000 字；提取看门狗防锁死
+ *    计费 —— chat 失败按原因决定是否退 images（限流/鉴权/5xx/已返回200 不再二连击）；
+ *      锁脸编辑接口 200 无图就不再试下一种形状
+ *    其它 —— 延迟框清空不再退成 1800、图片宽度清空不再退成 60（归一化值回显到框里）；
+ *      提取超时默认 180 秒（0=不限会锁死）；图片下载带超时与中止；「停止」能掐断并发的生图
+ *    面板 —— 手机端整体变矮 60px；修「延迟 / 图片宽度」输入框不齐（格子底边对齐 + 长标签收短）
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.7.3";
+    const VERSION = "1.8.0";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -69,7 +80,7 @@
         extAnchors: "",
         anchorGuideOn: true,
         extProxy: false,
-        requestTimeout: 0,
+        requestTimeout: 180,
         retryOnce: true,
         // —— 分层 ——
         layered: false,
@@ -1214,7 +1225,11 @@
         ];
 
     let currentDesc = "", currentIdx = -1, processing = false, initialized = false;
-    let extAbort = null, genAbort = null, extUserAbort = false;
+    let extAbort = null, extUserAbort = false;
+    /* 在飞的生图控制器。并发是真会发生的（主模型自己写标记那条路是串行循环，
+       不受提取锁管；她同时手点另一楼的 🖼 就并发了），单例会被后发者覆盖，
+       先发的那个就再也停不掉、钱继续烧。 */
+    const genAborts = new Set();
     let retryTimer = null, autoTimer = null, pendingAutoIdx = -1;
     let layersFresh = false;      // 分层框里的内容是否有效（来自成功分层或用户手改）
     let panelVisible = false;
@@ -1276,6 +1291,11 @@
                 if (st[k] === undefined) st[k] = (v && typeof v === "object") ? Object.assign({}, v) : v;
             }
             if (!st.layerLocks || typeof st.layerLocks !== "object") st.layerLocks = {};
+            /* 1.7.3：提取超时 0=不限 会在中转站吞连接时把提取锁死（按钮永久灰），抬成 180 秒 */
+            if (!st.migrated173) {
+                if (!Number(st.requestTimeout) || Number(st.requestTimeout) <= 0) st.requestTimeout = 180;
+                st.migrated173 = true;
+            }
             /* 1.5：楼层图默认撑满楼层宽度 */
             if (!st.migrated15) {
                 if (Number(st.imageMaxWidth) === 60) st.imageMaxWidth = 100;
@@ -1986,7 +2006,7 @@
             }
             const pre = t.slice(0, phs[0].i), suf = t.slice(phs[phs.length - 1].e);
             if (pre && suf) {
-                try { out = out.replace(new RegExp("\\s*" + escRe(pre) + "[\\s\\S]*?" + escRe(suf), "g"), ""); } catch (e) {}
+                try { out = out.replace(tagRegex({ pre: pre, suf: suf }, "gi"), ""); } catch (e) {}
             } else if (pre) {
                 out = stripTail(out, pre);
             } else if (suf) {
@@ -2025,6 +2045,89 @@
                 msg.swipes[msg.swipe_id] = msg.mes;
             }
         } catch (e) {}
+        syncSwipeExtra(msg);
+    }
+
+    /* 酒馆每个 swipe 的 extra 另存在 msg.swipe_info[swipe_id].extra，切 swipe 时酒馆会用它
+       整个覆盖 msg.extra。我们写进 extra 的 sdg_* 必须同步过去，否则切走再切回来，
+       注入记录和图库会被一起抹掉（正文里的标记还在，但记录和图没了）。 */
+    const SDG_EXTRA_KEYS = ["sdg_desc", "sdg_tag", "sdg_env", "sdg_layers", "sdg_gal", "sdg_images", "sdg_image"];
+    function swipeInfoSlot(msg, make, forceId) {
+        if (!msg || !Array.isArray(msg.swipe_info)) return null;
+        const id = forceId != null ? Number(forceId) : (Number.isInteger(msg.swipe_id) ? msg.swipe_id : 0);
+        if (id < 0 || id >= msg.swipe_info.length) return null;
+        let slot = msg.swipe_info[id];
+        if (!slot || typeof slot !== "object") { if (!make) return null; slot = msg.swipe_info[id] = {}; }
+        if (!slot.extra || typeof slot.extra !== "object") { if (!make) return null; slot.extra = {}; }
+        return slot;
+    }
+    function syncSwipeExtra(msg) { syncSwipeExtraFor(msg, null); }
+    function syncSwipeExtraFor(msg, forceId) {
+        try {
+            const slot = swipeInfoSlot(msg, true, forceId);
+            if (!slot) return;
+            const ex = (msg && msg.extra) || {};
+            SDG_EXTRA_KEYS.forEach(function (k) {
+                if (ex[k] === undefined) delete slot.extra[k];
+                else slot.extra[k] = ex[k];
+            });
+        } catch (e) {}
+    }
+    /* 反向兜底：酒馆切 swipe 后 extra 被覆盖，swipe_info 里存着的补回来（只补不盖）；
+       图库按 swipe 分键，两边合并，免得在别的 swipe 生的图被旧快照挤掉 */
+    function restoreSwipeExtra(msg) {
+        try {
+            const slot = swipeInfoSlot(msg, false);
+            const src = slot && slot.extra;
+            if (!src) return false;
+            if (!msg.extra || typeof msg.extra !== "object") msg.extra = {};
+            let changed = false;
+            SDG_EXTRA_KEYS.forEach(function (k) {
+                if (src[k] === undefined) return;
+                if (k === "sdg_gal" && msg.extra.sdg_gal && typeof msg.extra.sdg_gal === "object") {
+                    const dst = msg.extra.sdg_gal, add = src.sdg_gal;
+                    if (add && typeof add === "object") {
+                        for (const sk in add) {
+                            if (!dst[sk]) { dst[sk] = add[sk]; changed = true; continue; }
+                            for (const sl in add[sk]) if (!dst[sk][sl]) { dst[sk][sl] = add[sk][sl]; changed = true; }
+                        }
+                    }
+                    return;
+                }
+                if (msg.extra[k] === undefined) { msg.extra[k] = src[k]; changed = true; }
+            });
+            return changed;
+        } catch (e) { return false; }
+    }
+
+    /* 落盘：酒馆的 saveChat 是 async，之前到处裸调且空 catch，失败和竞态都看不见。
+       统一走这里：同一帧内多次改动只落一次，失败明确提示（图/注入丢了得让她知道）。 */
+    let chatSaveTimer = null, chatSaveWaiters = 0;
+    function persistChat(why) {
+        const c = ctx();
+        if (!c || typeof c.saveChat !== "function") return Promise.resolve(false);
+        if (chatSaveTimer) clearTimeout(chatSaveTimer);
+        chatSaveWaiters++;
+        return new Promise(function (resolve) {
+            chatSaveTimer = setTimeout(function () {
+                chatSaveTimer = null;
+                const n = chatSaveWaiters; chatSaveWaiters = 0;
+                let r;
+                try { r = c.saveChat(); } catch (e) {
+                    log("落盘失败(" + (why || "") + "):", e && e.message || e);
+                    toast("落盘失败，刷新前这些改动可能丢：" + (e && e.message || e), false);
+                    return resolve(false);
+                }
+                if (r && typeof r.then === "function") {
+                    r.then(function () { log("已落盘 ×" + n + " (" + (why || "") + ")"); resolve(true); },
+                           function (e) {
+                               log("落盘失败(" + (why || "") + "):", e && e.message || e);
+                               toast("落盘失败，刷新前这些改动可能丢：" + (e && e.message || e), false);
+                               resolve(false);
+                           });
+                } else resolve(true);
+            }, 40);
+        });
     }
 
     function injectDescToMessage(desc, targetIdx, layers) {
@@ -2043,7 +2146,7 @@
         msg.mes = String(msg.mes || "").trimEnd() + "\n\n" + tag;
         rememberInject(msg, tag, desc, layers);
         syncSwipe(msg);
-        if (typeof c.saveChat === "function") c.saveChat();
+        persistChat("注入");
         rerenderFloor(idx);
         return { injected: true, tag: tag, slot: findAllTags(msg.mes).length - 1 };
     }
@@ -2093,7 +2196,7 @@
         msg.mes = next;
         rememberInject(msg, tag, p.desc, p.layers);
         syncSwipe(msg);
-        if (typeof c.saveChat === "function") c.saveChat();
+        persistChat("重注入");
         rerenderFloor(idx);
         return { injected: true, tag: tag, idx: idx, replaced: stripped !== before };
     }
@@ -2202,7 +2305,8 @@
                             const msgP = (ctx().chat || [])[idx0];
                             if (msgP) {
                                 stepImage(msgP, si, Number(pg.getAttribute("data-d")) || 1);
-                                try { if (typeof ctx().saveChat === "function") ctx().saveChat(); } catch (e) {}
+                                syncSwipeExtra(msgP);
+                                persistChat("翻图");
                                 slot.removeAttribute("data-sig");
                                 renderFloorImage(idx0);
                             }
@@ -2251,7 +2355,7 @@
     function fetchWithTimeout(url, options, timeoutMs) {
         timeoutMs = Number(timeoutMs || 0);
         if (!timeoutMs || timeoutMs <= 0 || typeof AbortController === "undefined") return fetch(url, options);
-        if (timeoutMs < 30000) timeoutMs = 30000;
+        if (timeoutMs < 5000) timeoutMs = 5000;
         options = options || {};
         const originalSignal = options.signal;
         const controller = new AbortController();
@@ -2263,7 +2367,10 @@
         }
         const timer = setTimeout(function () { try { controller.abort(); } catch (e) {} }, timeoutMs);
         options.signal = controller.signal;
-        return fetch(url, options).finally(function () { clearTimeout(timer); });
+        /* 故意不在 fetch resolve 时 clearTimeout：headers 到了不等于 body 读完了，
+           之前在这儿清掉，读 body 阶段就没有超时保护，站点半途不发了就永久挂着。
+           请求早完成的话这个 timer 到点 abort 一个已完成的控制器，没有副作用。 */
+        return fetch(url, options);
     }
 
     function normalizeApiBase(base) {
@@ -2298,7 +2405,9 @@
         text = stripImageTag(text);
         text = text.replace(/!\[[^\]]*\]\(\s*data:image\/[^)]*\)/gi, "");
         text = text.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+/g, "");
-        const maxLen = 9000;
+        /* 生图只画「此刻这一个画面」，9000 字里前面六千基本用不上，白烧 prefill 拖慢首字。
+           取的是末尾片段，留下的始终是最新剧情。 */
+        const maxLen = 4000;
         if (text.length > maxLen) {
             text = text.slice(text.length - maxLen);
             text = "【注意：以下为正文末尾片段，前文已省略】\n" + text;
@@ -2377,7 +2486,10 @@
                 { role: "user", content: buildVisionUserPrompt(text, supplement || "", layerOpts) }
             ],
             temperature: 0.4,
-            stream: false
+            stream: false,
+            /* 输出封顶：六层合起来一两百 token 就够，不封顶时模型可能一路写下去，
+               每多 100 个输出 token 就多等好几秒 */
+            max_tokens: 800
         };
 
         let url, headers, reqBody;
@@ -2391,6 +2503,7 @@
                 model: c.extModel,
                 messages: body.messages,
                 temperature: body.temperature,
+                max_tokens: body.max_tokens,
                 stream: false
             };
         } else {
@@ -2501,8 +2614,10 @@
             reader.readAsDataURL(blob);
         });
     }
-    async function dataUrlFromUrl(url) {
-        const resp = await fetch(url, { headers: directHeaders() });
+    async function dataUrlFromUrl(url, signal) {
+        /* 带上生图的 signal 和一个独立超时：这一步之前裸 fetch，站点返回 url 而 CDN 卡住时
+           整条生图永久悬挂，那一槽一直转圈，点「停止」也掐不断（它不接 abort） */
+        const resp = await fetchWithTimeout(url, { headers: directHeaders(), signal: signal }, 120000);
         if (!resp.ok) throw new Error("下载图片失败: " + resp.status);
         const blob = await resp.blob();
         return await blobToDataURL(blob);
@@ -2550,10 +2665,12 @@
             let result;
             try { result = JSON.parse(text); } catch (e) { throw new Error(tag + " 响应不是 JSON: " + text.slice(0, 120)); }
             const item = result && result.data && result.data[0];
-            if (!item) throw new Error(tag + " 响应缺少 data[0]: " + text.slice(0, 150));
+            /* 200 回来就意味着这一发已经计费了，解析不出图也不能再试下一种形状，
+               否则锁脸最坏四种形状各扣一次 */
+            if (!item) { const e = new Error(tag + " 响应缺少 data[0]: " + text.slice(0, 150)); e.sdgCharged = true; throw e; }
             if (item.b64_json) return "data:image/png;base64," + item.b64_json;
-            if (item.url) return await normalizeImageToDataUrl(item.url);
-            throw new Error(tag + " 响应未包含图片");
+            if (item.url) return await normalizeImageToDataUrl(item.url, signal);
+            const e2 = new Error(tag + " 响应未包含图片"); e2.sdgCharged = true; throw e2;
         }
         function multipartBody(pngDataUrl, mime, filename) {
             const bin = atob(pngDataUrl.split(",")[1]);
@@ -2599,6 +2716,7 @@
                     const ae = genAbortError(ctl); if (ae) throw ae;
                     errs.push("[" + tag + "] " + String(e.message || e).slice(0, 110));
                     log("编辑接口形状 " + tag + " 失败:", String(e.message || e).slice(0, 200));
+                    if (e && e.sdgCharged) throw new Error("编辑接口已返回 200 但没给出图片，为免重复扣费没再试其它形状 → " + errs.join(" ｜ "));
                 }
             }
             throw new Error("编辑接口四种形状均失败 → " + errs.join(" ｜ "));
@@ -2622,19 +2740,14 @@
         const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
         const timeoutMs = Math.max(30, Number(cfg().genTimeout) || 300) * 1000;
         const timer = ctrl ? setTimeout(function () { timedOut = true; try { ctrl.abort(); } catch (e) {} }, timeoutMs) : null;
-        let onExt = null;
-        if (ctrl && genAbort && genAbort.signal) {
-            const ext = genAbort.signal;
-            onExt = function () { userAborted = true; try { ctrl.abort(); } catch (e) {} };
-            if (ext.aborted) onExt();
-            else try { ext.addEventListener("abort", onExt); } catch (e) {}
-        }
+        const rec = { markUser: function () { userAborted = true; try { if (ctrl) ctrl.abort(); } catch (e) {} } };
+        genAborts.add(rec);
         return {
-            signal: ctrl ? ctrl.signal : (genAbort ? genAbort.signal : undefined),
+            signal: ctrl ? ctrl.signal : undefined,
             timeoutSec: Math.round(timeoutMs / 1000),
             isTimedOut: function () { return timedOut; },
             isUserAborted: function () { return userAborted; },
-            dispose: function () { if (timer) clearTimeout(timer); if (onExt && genAbort) try { genAbort.signal.removeEventListener("abort", onExt); } catch (e) {} }
+            dispose: function () { if (timer) clearTimeout(timer); genAborts.delete(rec); }
         };
     }
     function genAbortError(ctl) {
@@ -2743,8 +2856,14 @@
 
         /* ① 主路径：chat/completions */
         let lastErr = "";
+        /* 兜底只在「这个站的 chat 通道根本不通」时才走：接口不存在(404/405/501)、
+           参数不被接受(400)、网络层错误。鉴权(401/403)、限流(429)、服务端错(5xx)一律不退——
+           退了也是再吃一次同样的错，还白添一次请求；200 但解析不出图更是已经计费了，
+           再发一次等于同一张图扣两回。 */
+        let canFallback = false, charged = false;
         if (imagesOnly) {
             lastErr = "按地址直连 images 接口";
+            canFallback = true;
         } else if (c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
             /* 酒馆后端代理通道：仅 chat，无 images 兜底；请求体保持后端约定原样 */
             const parts = [];
@@ -2768,7 +2887,7 @@
                 if (resp.ok) {
                     const result = await readOpenAIResponse(resp);
                     const u = imgUrlFromChat(result);
-                    if (u) { ctl.dispose(); return { image: await normalizeImageToDataUrl(u), prompt: finalPrompt, via: "proxy" }; }
+                    if (u) { const img = await normalizeImageToDataUrl(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "proxy" }; }
                     lastErr = "代理 chat 接口响应中没有图片";
                 } else {
                     const t = await resp.text();
@@ -2793,21 +2912,30 @@
             if (resp.ok) {
                 const result = await readOpenAIResponse(resp);
                 const u = imgUrlFromChat(result);
-                if (u) { ctl.dispose(); return { image: await normalizeImageToDataUrl(u), prompt: finalPrompt, via: "chat" }; }
+                if (u) { const img = await normalizeImageToDataUrl(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "chat" }; }
                 lastErr = "chat 接口响应中没有图片";
+                charged = true;
             } else {
                 const t = await resp.text();
                 lastErr = "chat 接口 " + siteErrorBrief(resp.status, t);
+                canFallback = (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 400);
             }
         } catch (e) {
             const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
             lastErr = "chat 接口网络错误: " + (e && e.message || e);
+            canFallback = true;
         }
 
         /* ② 兜底：images/generations（后端代理通道没有这一兜底） */
         if (c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
             ctl.dispose();
             throw new Error(lastErr || "chat 接口生图失败");
+        }
+        if (!canFallback) {
+            ctl.dispose();
+            throw new Error(lastErr + (charged
+                ? "（站点已返回 200，可能已计费，没有再试 images 接口以免重复扣费）"
+                : "（没再试 images 接口：这类错误退了也是同样结果）"));
         }
         try {
             const headers = { "Content-Type": "application/json", "Accept": "*/*" };
@@ -2830,7 +2958,7 @@
             if (resp2.ok) {
                 const result2 = await readOpenAIResponse(resp2);
                 const u2 = imgUrlFromGen(result2);
-                if (u2) { ctl.dispose(); return { image: await normalizeImageToDataUrl(u2), prompt: finalPrompt, via: "generations" }; }
+                if (u2) { const img2 = await normalizeImageToDataUrl(u2, ctl.signal); ctl.dispose(); return { image: img2, prompt: finalPrompt, via: "generations" }; }
                 ctl.dispose();
                 throw new Error("images 接口响应未包含图片 / " + lastErr);
             }
@@ -2849,10 +2977,10 @@
         log("响应中没有图片");
         throw new Error("API 响应中没有找到图片");
     }
-    async function normalizeImageToDataUrl(u) {
+    async function normalizeImageToDataUrl(u, signal) {
         if (!u) return "";
         if (String(u).startsWith("data:image/")) return u;
-        try { return await dataUrlFromUrl(u); }
+        try { return await dataUrlFromUrl(u, signal); }
         catch (e) { log("下载失败，直接用 URL 兜底:", e.message); return u; }
     }
 
@@ -2914,7 +3042,6 @@
         if (!finalPrompt) throw new Error("没有可用的生图提示词");
         log("生图最终提示词:", finalPrompt.slice(0, 200));
 
-        if (typeof AbortController !== "undefined") genAbort = new AbortController();
         try {
             const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
             let imageUrl = (faceRef && String(cfg().faceRefMode) === "edits") ? await genEdits(finalPrompt, faceRef) : (await genImageUnified(finalPrompt)).image;
@@ -2923,9 +3050,7 @@
             }
             imageUrl = await persistGenImage(imageUrl);
             return { image: imageUrl, prompt: finalPrompt };
-        } finally {
-            genAbort = null;
-        }
+        } finally { /* 控制器由 createGenController/dispose 自己登记注销 */ }
     }
 
     /* ============================================================
@@ -2980,8 +3105,10 @@
     function getImageCount(msg, slot) { const r = slotRec(msg, slot); return r ? r.list.length : 0; }
     function getImageCur(msg, slot) { const r = slotRec(msg, slot); return r ? Math.min(Math.max(Number(r.cur) || 0, 0), r.list.length - 1) : 0; }
     /* 新图追加进历史并成为当前 */
-    function setImage(msg, slot, url) {
-        const g = galWrite(msg), sk = swipeKey(msg);
+    function setImage(msg, slot, url, swipeOverride) {
+        /* swipeOverride：生图是异步的，等图回来时她可能已经左右滑到别的回复了。
+           不指定的话 swipeKey 读到的是「现在」那条，图就归错了人。 */
+        const g = galWrite(msg), sk = swipeOverride || swipeKey(msg);
         if (!g[sk] || typeof g[sk] !== "object") g[sk] = {};
         let r = g[sk][String(slot)];
         if (!r || !Array.isArray(r.list)) r = g[sk][String(slot)] = { list: [], cur: 0 };
@@ -3410,6 +3537,19 @@
         const attempt = Number(opts.attempt || 0);
         if (processing) return;
         processing = true;
+        /* 看门狗：万一请求既不返回也不抛错（中转站吞连接），finally 永不执行，
+           processing 会一直是 true —— 之后每次自动提取都在上面那行被静默吞掉、
+           提取按钮永久变灰。这里兜住，到点强制解锁并说清原因。 */
+        const guardMs = (Math.max(10, Number(cfg().requestTimeout) || 180) + 30) * 1000;
+        let guard = setTimeout(function () {
+            guard = null;
+            if (!processing) return;
+            processing = false;
+            const bg = q("#sdg-btn-extract"); if (bg) bg.disabled = false;
+            setStatus("提取没有响应，已解锁（可以再点提取）", C_ERR);
+            log("提取看门狗触发，强制解锁");
+        }, guardMs);
+        let pendingGen = null;
         const layered = !!cfg().layered;
         setStatus(attempt > 0 ? "正在自动重试提取…" : (layered ? "正在分层提取…" : "正在提取…"), C_OK);
         const btn = q("#sdg-btn-extract"); if (btn) btn.disabled = true;
@@ -3430,7 +3570,14 @@
                     setLayerBoxes(layers);
                     layersFresh = true;
                     desc = joinLayers(layers);
-                    setStatus("分层提取完成", C_OK);
+                    /* 模型说「沿用」但其实没有旧值可沿用时，那层会是空的 —— 别静默丢掉 */
+                    const wiped = LAYERS.filter(function (l) {
+                        return isNoChange(parsed[l]) && !String(layers[l] || "").trim();
+                    });
+                    if (wiped.length) {
+                        setStatus("分层提取完成（" + wiped.map(function (l) { return LAYER_LABEL[l] || l; }).join("/") + " 没内容）", C_WARN);
+                        log("这些层模型回了 NO_CHANGE 但没有旧值可沿用:", wiped.join(","));
+                    } else setStatus("分层提取完成", C_OK);
                 } else {
                     layersFresh = false;
                     setStatus("副AI没按分层输出，已整段兜底", C_WARN);
@@ -3446,10 +3593,15 @@
                     try {
                         const r = injectDescToMessage(desc, targetIdx, layers);
                         if (r.injected) setStatus("已注入 ✓", C_OK);
-                    } catch (eInj) { log("自动注入失败:", eInj.message); }
+                        else if (r.reason === "duplicate") setStatus("这条已经在楼里了，没重复注入", C_WARN);
+                        else setStatus("没注入（" + (r.reason || "未知") + "）", C_WARN);
+                    } catch (eInj) {
+                        log("自动注入失败:", eInj.message);
+                        setStatus("注入失败: " + eInj.message, C_ERR);
+                    }
                 }
                 if (cfg().autoGenerate && cfg().enabled) {
-                    await generateForFloor(targetIdx, desc, undefined, layers);
+                    pendingGen = { idx: targetIdx, desc: desc, layers: layers };
                 }
             }
         } catch (e) {
@@ -3463,9 +3615,18 @@
                 toast("提取失败：" + msg, false);
             }
         } finally {
+            if (guard) { clearTimeout(guard); guard = null; }
             const btn2 = q("#sdg-btn-extract"); if (btn2) btn2.disabled = false;
             extAbort = null; extUserAbort = false;
             processing = false;
+        }
+
+        /* 生图在提取锁外面跑。之前它被圈在锁内到 finally 才解锁，下一楼的提取得干等
+           这张图生完（几十秒）；而且生图失败会落进上面的 catch 去触发「提取重试」，
+           白烧一次提取。两件事都在这儿一并解决。 */
+        if (pendingGen) {
+            try { await generateForFloor(pendingGen.idx, pendingGen.desc, undefined, pendingGen.layers); }
+            catch (eGen) { /* generateForFloor 内部已经提示过了 */ }
         }
     }
 
@@ -3485,15 +3646,27 @@
         const key = idx + ":" + slot;
         if (genBusy[key]) { setStatus("这张正在生图中", C_WARN); return ""; }
         genBusy[key] = true;
+        const swipeAtStart = msg ? swipeKey(msg) : null;
         if (msg) renderFloorImage(idx);
         setStatus("正在生图…", C_OK);
         const t0 = Date.now();
         try {
             const { image } = await generateImage(desc, layers);
             if (msg) {
-                setImage(msg, slot, image);
+                /* 这楼还在不在？删楼后索引会整体左移，msg 可能已经被移出 chat，
+                   往孤儿对象上写再 saveChat 等于白存 */
+                const alive = (ctx().chat || [])[idx] === msg || (ctx().chat || []).indexOf(msg) >= 0;
+                if (!alive) {
+                    setStatus("这楼已经没了，图没入库", C_WARN);
+                    return image;
+                }
+                setImage(msg, slot, image, swipeAtStart);
                 if (!injectRecord(msg)) rememberInject(msg, buildInjectTag(desc, null), desc, layers || null);
-                try { if (typeof ctx().saveChat === "function") ctx().saveChat(); } catch (eS) {}
+                const movedSwipe = swipeAtStart && swipeKey(msg) !== swipeAtStart;
+                if (movedSwipe) syncSwipeExtraFor(msg, swipeAtStart);
+                else syncSwipeExtra(msg);
+                await persistChat("生图入库");
+                if (movedSwipe) setStatus("生图完成（期间切了回复，图在原来那条里）✓", C_WARN);
             }
             const dur = ((Date.now() - t0) / 1000).toFixed(1);
             setStatus("生图完成，耗时 " + dur + " 秒 ✓", C_OK);
@@ -3507,7 +3680,6 @@
             throw e;
         } finally {
             delete genBusy[key];
-            genAbort = null;
             if (msg) { try { renderFloorImage(idx); installMesButtons(); } catch (e) {} }
         }
     }
@@ -3520,7 +3692,29 @@
     }
 
     /* —— 标记识别：模板的前缀/后缀 + 内置 image###…### + <draw>…</draw> —— */
+    /* 标记正则：模型写法常有偏差，放宽两处，否则一偏就整楼认不出
+         ① 井号数量不限且容忍全角（image##… / image####… / image＃＃＃…）
+         ② 前缀里含后缀时（image### 含 ###），内层禁止再出现前缀——
+            不然「image###甲 …漏了闭合… image###乙###」会被匹配成一个错标记并把乙吞掉 */
+    const HASH = "[#＃]";
+    function tagRegex(p, flags) {
+        const mPre = /^([\s\S]*?)([#＃]{2,})$/.exec(p.pre);
+        const mSuf = /^([#＃]{2,})$/.exec(p.suf);
+        if (mPre && mSuf) {
+            const open = escRe(mPre[1]) + HASH + "{2,}";
+            return new RegExp(open + "((?:(?!" + open + ")[\\s\\S])*?)" + HASH + "{2,}", flags || "gi");
+        }
+        const pre = escRe(p.pre), suf = escRe(p.suf);
+        const inner = p.pre.indexOf(p.suf) >= 0
+            ? "((?:(?!" + pre + ")[\\s\\S])*?)"
+            : "([\\s\\S]*?)";
+        return new RegExp(pre + inner + suf, flags || "gi");
+    }
+
+    let mpCache = null, mpCacheKey = "";
     function markerPairs() {
+        const ck = getTemplateValue();
+        if (mpCache && mpCacheKey === ck) return mpCache;
         const out = [], seen = {};
         const push = function (pre, suf) {
             pre = String(pre || ""); suf = String(suf || "");
@@ -3539,6 +3733,7 @@
         }
         push("image###", "###");
         push("<draw>", "</draw>");
+        mpCache = out; mpCacheKey = ck;
         return out;
     }
     /* 楼层正文里所有标记，按出现顺序 → [{full, inner, pre, suf}] */
@@ -3546,7 +3741,7 @@
         const t = String(text || "");
         const found = [];
         markerPairs().forEach(function (p) {
-            const re = new RegExp(escRe(p.pre) + "([\\s\\S]*?)" + escRe(p.suf), "gi");
+            const re = tagRegex(p);
             let m;
             while ((m = re.exec(t)) !== null) {
                 const inner = String(m[1] || "").trim();
@@ -3568,11 +3763,19 @@
         return all.length ? all[all.length - 1].full : "";
     }
     function tagInner(tag) {
-        const t = String(tag || "");
+        const t = String(tag || "").trim();
+        /* 先按宽松正则整串对一遍，井号写多写少都能剥干净；再退字面比较 */
+        for (const p of markerPairs()) {
+            try {
+                const m = tagRegex(p, "i").exec(t);
+                if (m && m.index === 0 && m[0].length === t.length) return String(m[1] || "").trim();
+            } catch (e) {}
+        }
         for (const p of markerPairs()) {
             if (t.startsWith(p.pre) && t.endsWith(p.suf)) return t.slice(p.pre.length, t.length - p.suf.length).trim();
         }
-        return t.replace(/^\s*<[A-Za-z][\w-]*\s*>/, "").replace(/<\/[A-Za-z][\w-]*\s*>\s*$/, "").replace(/^image###/, "").replace(/###$/, "").trim();
+        return t.replace(/^\s*<[A-Za-z][\w-]*\s*>/, "").replace(/<\/[A-Za-z][\w-]*\s*>\s*$/, "")
+                .replace(/^image[#＃]{2,}/i, "").replace(/[#＃]{2,}$/, "").trim();
     }
 
     function onMsgReceived(idx) {
@@ -3703,9 +3906,13 @@
     }
     function onStop() {
         try {
-            if (extAbort) { extUserAbort = true; extAbort.abort(); extAbort = null; }
-            if (genAbort) { genAbort.abort(); genAbort = null; }
-            setStatus("已打断当前请求", C_ERR);
+            let n = 0;
+            if (extAbort) { extUserAbort = true; extAbort.abort(); extAbort = null; n++; }
+            n += genAborts.size;
+            genAborts.forEach(function (r) { try { r.markUser(); } catch (e) {} });
+            genAborts.clear();
+            /* 之前不管有没有在跑都报「已打断」，并发时还会漏掉先发的那个 */
+            setStatus(n ? "已打断当前请求" : "现在没有在跑的请求", n ? C_ERR : C_WARN);
         } catch (e) {}
     }
 
@@ -4035,7 +4242,7 @@
                     '<div class="sdg-hint">默认 image###{Description}###　分层可用 {Camera} {Env} {Mood} {Chars} {Outfit} {Pose}</div>' +
                     chk("sdg-ext-proxy", "extProxy", "走酒馆后端代理") +
                     chk("sdg-retry", "retryOnce", "自动提取失败 10 秒后重试一次") +
-                    field("超时（秒，0 = 不限）", textInput("sdg-timeout", "requestTimeout", "", "number")) +
+                    field("超时（秒）", textInput("sdg-timeout", "requestTimeout", "180", "number")) +
                 '</section>' +
             '</div>' +
         '</div>';
@@ -4177,9 +4384,23 @@
         bindChk("#sdg-auto-generate", "autoGenerate");
         bindChk("#sdg-hide-tag", "hideTagText", function () { renderAllImages(); });
         bindChk("#sdg-show-img", "showImage", function (v) { document.body.classList.toggle("sdg-hide-images", !v); });
-        q("#sdg-delay").addEventListener("change", function (ev) { save("autoDelay", Number(ev.target.value) || 1800); });
-        q("#sdg-imgw").addEventListener("change", function (ev) { save("imageMaxWidth", Number(ev.target.value) || 60); applyImageWidth(); });
-        q("#sdg-gen-timeout").addEventListener("change", function (ev) { save("genTimeout", Math.max(30, Number(ev.target.value) || 300)); });
+        /* 清空或填 0 时别退回老默认（延迟曾会退成 1800、图片宽度退成 60），
+           归一化后的值写回框里，让她看见真正生效的是多少 */
+        const numField = function (sel, key, dflt, min, max, after) {
+            const el = q(sel); if (!el) return;
+            el.addEventListener("change", function (ev) {
+                const raw = Number(ev.target.value);
+                let v = Number.isFinite(raw) && raw > 0 ? raw : dflt;
+                if (typeof min === "number") v = Math.max(min, v);
+                if (typeof max === "number") v = Math.min(max, v);
+                save(key, v);
+                if (String(v) !== String(ev.target.value)) ev.target.value = v;
+                if (after) after();
+            });
+        };
+        numField("#sdg-delay", "autoDelay", 800, 100, null, null);
+        numField("#sdg-imgw", "imageMaxWidth", 100, 10, 100, applyImageWidth);
+        numField("#sdg-gen-timeout", "genTimeout", 300, 30, null, null);
         bindChk("#sdg-enabled", "enabled", function () { syncDrawer(); });
         bindChk("#sdg-show-ball", "showBall", function () { applyBallVisible(); syncDrawer(); });
 
@@ -4191,7 +4412,7 @@
         bindText("#sdg-template", "template");
         bindChk("#sdg-ext-proxy", "extProxy");
         bindChk("#sdg-retry", "retryOnce");
-        q("#sdg-timeout").addEventListener("change", function (ev) { save("requestTimeout", Number(ev.target.value) || 0); });
+        numField("#sdg-timeout", "requestTimeout", 180, 10, null, null);
 
         const sysSel = q("#sdg-sys-select");
         const sysVal = q("#sdg-sys-value");
@@ -4437,6 +4658,13 @@
             ["MESSAGE_SWIPED", "MESSAGE_UPDATED", "MESSAGE_EDITED"].forEach(function (evName) {
                 if (c.event_types[evName]) {
                     c.eventSource.on(c.event_types[evName], function (i) {
+                        /* 酒馆切 swipe 时会用 swipe_info[swipe_id].extra 覆盖 msg.extra，
+                           先把我们的注入记录和图库补回来，再重绘，否则图会"消失" */
+                        try {
+                            const n0 = Number(i);
+                            const m0 = Number.isFinite(n0) ? (ctx().chat || [])[n0] : null;
+                            if (m0 && restoreSwipeExtra(m0)) persistChat("swipe 恢复");
+                        } catch (e) {}
                         setTimeout(function () {
                             try { const n = Number(i); if (Number.isFinite(n)) renderFloorImage(n); else renderAllImages(); installMesButtons(); } catch (e) {}
                         }, 120);
@@ -4510,7 +4738,7 @@
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
-            trimSourceText
+            trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs
         };
     }
 
