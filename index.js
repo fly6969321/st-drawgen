@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.7.1
+ *  生图工坊 · DrawGen v1.7.2
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -17,12 +17,13 @@
  *  · v1.7.1 面板纵向压缩；自动提取固定等待 1800→800ms（未自定义过的老配置自动迁移，下限 100ms）；
  *    提取请求不再把本插件注入的生图块和内嵌 base64 图发给副AI（少烧 prefill）；忙等轮询 1200→300ms；
  *    修复 v1.7.0 内置提取站点因结构问题未真正播种的问题
+ *  · v1.7.2 手机端面板纵向大幅压缩：勾选组两列排列，标题/字段/提示/输入框/按钮间距全面收紧（仅 ≤720px 窄屏）
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.7.1";
+    const VERSION = "1.7.2";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -3969,15 +3970,19 @@
                         '<option value="chat"' + (cfg().faceRefMode !== "edits" ? " selected" : "") + '>聊天多模态（默认，Gemini / GPT 系）</option>' +
                         '<option value="edits"' + (cfg().faceRefMode === "edits" ? " selected" : "") + '>编辑接口（/images/edits，Grok 编辑模型等）</option>' +
                     '</select>') +
+                    '<div class="sdg-chkgrid">' +
                     chk("sdg-gen-proxy", "genProxy", "Gemini 走酒馆后端代理") +
                     chk("sdg-jpeg", "convertToJpeg", "入库前转 JPEG") +
+                    '</div>' +
 
                     '<h5>自动化</h5>' +
+                    '<div class="sdg-chkgrid">' +
                     chk("sdg-auto-extract", "autoExtract", "收到回复后自动提取") +
                     chk("sdg-auto-inject", "autoInject", "提取后自动注入") +
                     chk("sdg-auto-generate", "autoGenerate", "注入后自动生图") +
                     chk("sdg-hide-tag", "hideTagText", "楼层里收起提示词文字") +
                     chk("sdg-show-img", "showImage", "楼层内显示图片") +
+                    '</div>' +
                     '<div class="sdg-grid2">' +
                         field("延迟（毫秒，越小提取触发越快）", textInput("sdg-delay", "autoDelay", "", "number")) +
                         field("图片宽度（%）", textInput("sdg-imgw", "imageMaxWidth", "", "number")) +
@@ -3986,8 +3991,10 @@
                     '<div class="sdg-hint">生图超过该秒数自动停止且不补发（避免重复扣费）；「停止」按钮同样立即掐断</div>' +
 
                     '<h5>插件</h5>' +
+                    '<div class="sdg-chkgrid">' +
                     chk("sdg-enabled", "enabled", "启用生图工坊") +
                     chk("sdg-show-ball", "showBall", "显示悬浮球") +
+                    '</div>' +
                 '</section>' +
 
                 /* ========== 提取页（工作区在这里） ========== */

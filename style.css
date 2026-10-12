@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.6.0 */
+/* 生图工坊 · DrawGen v1.7.2 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -287,6 +287,8 @@
     cursor: pointer;
 }
 #sdg-panel label.sdg-chk input { width: auto; margin: 0; }
+/* 勾选组：桌面端单列；手机端在 media 里改两列 */
+.sdg-chkgrid { display: flex; flex-direction: column; }
 
 /* —— 分层提取：栏 + iOS 风格圆圈开关（开 = 栏亮蓝 + 蓝字，下方自动展开五层区） —— */
 #sdg-panel label.sdg-layered-bar {
@@ -674,6 +676,40 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
     #sdg-panel { width: 96vw; left: 2vw !important; top: 2vh !important; max-height: 94vh; }
     #sdg-layers { grid-template-columns: 1fr; }
     .sdg-slot, .sdg-img.sdg-orphan { max-width: 100% !important; }
+
+    /* —— 手机端纵向大幅压缩（桌面端不受影响） —— */
+    #sdg-panel-head { padding: 6px 11px; }
+    #sdg-panel-body { padding: 4px 9px 5px; gap: 5px; }
+    #sdg-status { min-height: 14px; font-size: 11.5px; }
+    #sdg-panel #sdg-preview { min-height: 54px; padding: 6px 8px; }
+    .sdg-tabs { gap: 6px; }
+    .sdg-tab { padding: 7px 8px; font-size: 13px; }
+    .sdg-pane { padding: 2px 9px 3px; border-radius: 8px; }
+    .sdg-pane h5 { margin: 5px 0 2px; font-size: 11.5px; }
+    .sdg-field { margin: 3px 0 0; }
+    .sdg-field label { margin-bottom: 2px; font-size: 11px; }
+    .sdg-grid2 { gap: 5px 6px; }
+    #sdg-panel input[type="text"],
+    #sdg-panel input[type="password"],
+    #sdg-panel input[type="number"],
+    #sdg-panel select,
+    #sdg-panel .sdg-pane textarea { padding: 4px 7px; }
+    .sdg-hint { font-size: 10.5px; line-height: 1.35; }
+    #sdg-panel label.sdg-chk { margin: 2px 0 0; font-size: 12px; line-height: 1.25; gap: 5px; }
+    .sdg-chkgrid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        column-gap: 8px;
+        row-gap: 2px;
+    }
+    .sdg-btns { gap: 5px; }
+    .sdg-btns button { padding: 5px 8px; }
+    .sdg-main-btns button { padding: 4px 8px; }
+    .sdg-pane .sdg-btns { margin-top: 5px; }
+    #sdg-face-pick { padding: 6px 0 !important; font-size: 12px !important; }
+    #sdg-panel label.sdg-layered-bar { margin: 6px 0 2px; padding: 6px 10px; font-size: 12.5px; }
+    .sdg-work { gap: 5px; padding: 6px; margin-bottom: 3px; }
+    #sdg-layers { gap: 6px; padding: 6px; }
 }
 
 /* 简洁图片预览：默认适屏，图片区域独立缩放/拖动，不改变页面比例。 */
