@@ -121,11 +121,11 @@
 .sdg-iconbtn:hover { background: var(--sdg-line); }
 
 #sdg-panel-body {
-    padding: 10px 12px 14px;
+    padding: 6px 12px 7px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
 }
 
 #sdg-status {
@@ -236,19 +236,19 @@
     display: none;
     border: 1px solid var(--sdg-line);
     border-radius: 10px;
-    padding: 8px 11px 12px;
+    padding: 3px 11px 5px;
     background: var(--sdg-bg2);
     min-width: 0;
 }
 .sdg-pane.on { display: block; }
 .sdg-pane h5 {
-    margin: 12px 0 4px;
+    margin: 9px 0 3px;
     font-size: 12px;
     font-weight: 700;
     color: var(--sdg-fg2);
     letter-spacing: 0.04em;
 }
-.sdg-field { margin: 6px 0 0; }
+.sdg-field { margin: 5px 0 0; }
 .sdg-field label {
     display: block;
     margin: 0 0 3px;
@@ -282,7 +282,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 6px 0 0;
+    margin: 4px 0 0;
     font-size: 12px;
     cursor: pointer;
 }

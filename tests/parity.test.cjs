@@ -29,6 +29,9 @@ test('fresh install seeds builtin gen/ext sites and syncs flat fields', t => {
     assert.equal(gens.length, 13, '13 builtin gen sites');
     const exts = debug.getProfiles('ext');
     assert.equal(exts.length, 1, '1 builtin ext site');
+    assert.equal(exts[0].id, 'smu0ujfttce', 'ext site is the builtin one, not a lazy snapshot');
+    assert.equal(exts[0].endpoint, 'https://gcli.ggchan.dev/v1');
+    assert.equal(ctx.extensionSettings['st-drawgen'].sdgBuiltinSeeded17, true, 'seeding completed without throwing');
     const active = debug.activeProfile('gen');
     assert.equal(active.name, 'wong');
     assert.equal(ctx.extensionSettings['st-drawgen'].genProfileId, active.id);
@@ -50,6 +53,36 @@ test('existing user sites are not overwritten by builtin seeding', t => {
     const gens = debug.getProfiles('gen');
     assert.equal(gens.length, 1);
     assert.equal(gens[0].name, '我的站');
+});
+
+test('extraction input strips plugin injection blocks and inline base64 images', t => {
+    const { debug } = fixture(t);
+    const out1 = debug.trimSourceText('少女走进森林 image###a girl walking into the forest### 风吹过树叶');
+    assert.doesNotMatch(out1, /image###|a girl walking/);
+    assert.match(out1, /少女走进森林/);
+    assert.match(out1, /风吹过树叶/);
+    const out2 = debug.trimSourceText('正文开头\n<draw>masterpiece, 1girl, forest</draw>\n正文结尾');
+    assert.doesNotMatch(out2, /<draw>|masterpiece/);
+    assert.match(out2, /正文开头/);
+    assert.match(out2, /正文结尾/);
+    const out3 = debug.trimSourceText('前文 ![](data:image/png;base64,iVBORw0KGgoAAAANS=) 后文');
+    assert.doesNotMatch(out3, /data:image|base64/);
+    assert.match(out3, /前文/);
+    assert.match(out3, /后文/);
+    const out4 = debug.trimSourceText('xxx data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ yyy');
+    assert.doesNotMatch(out4, /data:image|4AAQSkZJRg/);
+    /* 普通外链图片和正常正文不动 */
+    const keep = debug.trimSourceText('看图 ![](https://x.test/a.png) 结束');
+    assert.match(keep, /https:\/\/x\.test\/a\.png/);
+});
+
+test('auto delay migrates untouched 1800ms default to 800ms, keeps custom values', t => {
+    const f1 = fixture(t, { autoDelay: 1800 });
+    assert.equal(f1.ctx.extensionSettings['st-drawgen'].autoDelay, 800);
+    const f2 = fixture(t, { autoDelay: 3000 });
+    assert.equal(f2.ctx.extensionSettings['st-drawgen'].autoDelay, 3000);
+    const f3 = fixture(t, {});
+    assert.equal(f3.ctx.extensionSettings['st-drawgen'].autoDelay, 800);
 });
 
 test('normalizeGenSize converts full-width multiply sign and defaults', t => {

@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.7.0
+ *  生图工坊 · DrawGen v1.7.1
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -14,12 +14,15 @@
  *    地址直指 images 接口时直连、站点只认 response_format=url 时自动改发重试、
  *    全角 × 尺寸归一化、生图超时（默认 300 秒）与取消真正生效、
  *    失败提示带 HTTP 状态码与站点原话、画风 JSON 导入导出、预设包导入（模板 / 规则 / 系统提示 / 锚点归并）
+ *  · v1.7.1 面板纵向压缩；自动提取固定等待 1800→800ms（未自定义过的老配置自动迁移，下限 100ms）；
+ *    提取请求不再把本插件注入的生图块和内嵌 base64 图发给副AI（少烧 prefill）；忙等轮询 1200→300ms；
+ *    修复 v1.7.0 内置提取站点因结构问题未真正播种的问题
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.7.0";
+    const VERSION = "1.7.1";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -74,7 +77,7 @@
         autoExtract: true,
         autoInject: true,
         autoGenerate: true,
-        autoDelay: 1800,
+        autoDelay: 800,
         hideTagText: true,          // 出图后标记文字不显示（标记原位换成图）
         // —— 生图 ——
         genEndpoint: "", genKey: "", genModel: "",
@@ -1117,6 +1120,7 @@
             }
         ];
     const BUILTIN_EXT_PROFILES =
+        [
         {
             "id":  "smu0ujfttce",
             "name":  "默认",
@@ -1204,7 +1208,8 @@
             "endpoint":  "https://gcli.ggchan.dev/v1",
             "key":  "sk-在此填入你的Key",
             "model":  "gemini-3.1-pro-preview"
-        };
+        }
+        ];
 
     let currentDesc = "", currentIdx = -1, processing = false, initialized = false;
     let extAbort = null, genAbort = null, extUserAbort = false;
@@ -1311,6 +1316,11 @@
                         { endpoint: "extEndpoint", key: "extKey", model: "extModel" });
                 }
                 st.sdgBuiltinSeeded17 = true;
+            }
+            /* 1.7.1：老默认延迟 1800ms 偏保守（消息在事件回调时已落库），没自定义过的降到 800ms，自定义值不动 */
+            if (!st.sdgDelayFast171) {
+                if (Number(st.autoDelay) === 1800) st.autoDelay = 800;
+                st.sdgDelayFast171 = true;
             }
         } catch (e) { console.error(LOG, "loadSettings:", e); }
     }
@@ -2281,6 +2291,11 @@
     }
     function trimSourceText(text) {
         text = extractContentText(text);
+        /* 只把正文送给提取模型：剥掉本插件自己注入的生图块（image###…### / 模板块 / <draw>…</draw>，
+           那是上一轮的产物不是剧情）和内嵌 base64 图（动辄几万字符，白烧 prefill 还拖慢首字） */
+        text = stripImageTag(text);
+        text = text.replace(/!\[[^\]]*\]\(\s*data:image\/[^)]*\)/gi, "");
+        text = text.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+/g, "");
         const maxLen = 9000;
         if (text.length > maxLen) {
             text = text.slice(text.length - maxLen);
@@ -3597,8 +3612,8 @@
             pendingAutoIdx = i;
             currentIdx = i;
             if (autoTimer) clearTimeout(autoTimer);
-            let delay = Number(cfg().autoDelay || 1800);
-            if (delay < 500) delay = 500;
+            let delay = Number(cfg().autoDelay || 800);
+            if (delay < 100) delay = 100;
             autoTimer = setTimeout(runPendingAutoExtract, delay);
             setStatus("已捕捉新正文，等待自动提取…", C_OK);
         } catch (e) { console.error(LOG, e); }
@@ -3606,7 +3621,7 @@
 
     function runPendingAutoExtract() {
         if (pendingAutoIdx < 0) return;
-        if (processing) { setTimeout(runPendingAutoExtract, 1200); return; }
+        if (processing) { setTimeout(runPendingAutoExtract, 300); return; }
         try {
             const idx = pendingAutoIdx;
             pendingAutoIdx = -1;
@@ -3964,7 +3979,7 @@
                     chk("sdg-hide-tag", "hideTagText", "楼层里收起提示词文字") +
                     chk("sdg-show-img", "showImage", "楼层内显示图片") +
                     '<div class="sdg-grid2">' +
-                        field("延迟（毫秒）", textInput("sdg-delay", "autoDelay", "", "number")) +
+                        field("延迟（毫秒，越小提取触发越快）", textInput("sdg-delay", "autoDelay", "", "number")) +
                         field("图片宽度（%）", textInput("sdg-imgw", "imageMaxWidth", "", "number")) +
                         field("生图超时（秒）", textInput("sdg-gen-timeout", "genTimeout", "300", "number")) +
                     '</div>' +
@@ -4492,7 +4507,8 @@
             injectDescToMessage, reinjectDescToMessage, renderFloorImage, renderAllImages,
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
-            imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts
+            imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
+            trimSourceText
         };
     }
 
