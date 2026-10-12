@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.0 */
+/* 生图工坊 · DrawGen v1.8.1 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -672,8 +672,8 @@ body.sdg-hide-images .sdg-slot-body, body.sdg-hide-images .sdg-img.sdg-orphan { 
    手机窄屏
    ============================================================ */
 @media (max-width: 720px) {
-    /* 上边缘下移 30px、下边缘上移 30px → 面板整体矮 60px */
-    #sdg-panel { width: 96vw; left: 2vw !important; top: calc(2vh + 30px) !important; max-height: calc(94vh - 60px); }
+    /* 上边缘下移 60px、下边缘上移 60px → 面板整体矮 120px */
+    #sdg-panel { width: 96vw; left: 2vw !important; top: calc(2vh + 60px) !important; max-height: calc(94vh - 120px); }
     #sdg-layers { grid-template-columns: 1fr; }
     .sdg-slot, .sdg-img.sdg-orphan { max-width: 100% !important; }
 }

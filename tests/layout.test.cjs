@@ -66,19 +66,23 @@ test('.sdg-field puts no gap under the input, so field bottom == input bottom', 
     assert.equal(inputs.style.margin, '0px', '输入框自身无外边距');
 });
 
-test('mobile panel is 60px shorter: top +30px, max-height -60px', t => {
+test('mobile panel is shortened symmetrically from both edges', t => {
     const { rules } = sheet(t);
     const panel = findInMedia(rules, '720px', '#sdg-panel');
     assert.ok(panel, '手机端 #sdg-panel 规则存在');
 
-    /* jsdom 会把 calc(2vh + 30px) 规范化成 calc(30px + 2vh)，所以查成分不查原串 */
+    /* jsdom 会把 calc(2vh + 60px) 规范化成 calc(60px + 2vh)，所以查成分不查原串 */
     assert.match(panel.style.top, /^calc\(/, 'top 用 calc');
-    assert.ok(panel.style.top.includes('30px'), '上边缘下移 30px');
-    assert.ok(panel.style.top.includes('2vh'), '仍以 2vh 为基准');
-
     assert.match(panel.style.maxHeight, /^calc\(/, 'max-height 用 calc');
+    assert.ok(panel.style.top.includes('2vh'), '仍以 2vh 为基准');
     assert.ok(panel.style.maxHeight.includes('94vh'), '仍以 94vh 为基准');
-    assert.ok(panel.style.maxHeight.includes('60px'), '总高减 60px（上下各 30）');
+
+    /* 上边缘下移 N、下边缘上移 N，所以 max-height 要减掉 2N —— 这个关系别破坏，
+       不然面板会上下不对称或者底部出框 */
+    const top = Number((panel.style.top.match(/(\d+)px/) || [])[1]);
+    const cut = Number((panel.style.maxHeight.match(/(\d+)px/) || [])[1]);
+    assert.ok(top > 0, '上边缘有下移量');
+    assert.equal(cut, top * 2, 'max-height 减的是上移量的两倍（上下对称）');
 });
 
 test('the delay label is short enough not to wrap next to 图片宽度', t => {

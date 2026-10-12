@@ -256,14 +256,122 @@ test('extraction request caps its output length', t => {
     assert.ok(/max_tokens/.test(proxy), '代理通道也要封顶');
 });
 
-test('source text sent to the sub-AI is trimmed to a sane length', t => {
+test('her source text is not truncated below the long-standing 9000 limit', t => {
     const { debug } = fixture(t);
+    /* 她的正文确实会很长（一条标记就几千字符）。上限是她的既有行为，
+       不许再擅自往下砍 —— 之前砍到 4000 被她当场驳回。 */
     const long = '剧'.repeat(12000);
     const out = debug.trimSourceText(long);
-    assert.ok(out.length < 4600, '正文上限降到 4000 字档（原来 9000，约 5000-6500 token 的 prefill）');
-    assert.ok(out.includes('正文末尾片段'), '截断了要说明');
-    /* 留下的必须是最新的尾部，不是开头 */
+    assert.ok(out.length > 8500, '8500 字以内的正文必须原样送出去，别替她做减法');
+    assert.ok(out.includes('正文末尾片段'), '真超长时截断要说明');
+
+    /* 没超上限的正文一个字都不许动 */
+    const normal = '剧'.repeat(7000);
+    assert.equal(debug.trimSourceText(normal), normal, '7000 字原样不动');
+
+    /* 真截断时留下的必须是最新的尾部，不是开头 */
     const tail = '最后这句必须留着';
     const out2 = debug.trimSourceText('开头'.repeat(6000) + tail);
     assert.ok(out2.includes(tail), '保留的是末尾最新剧情');
+});
+
+/* ── 跨段落的长标记必须能变成槽（她 2026-10-12 报的：
+      "头尾都有、已经生成过图了，文字形式停在楼层里半天没转成图片"）── */
+
+/* 她截图里那条标记的真实形态：内容跨四段，中间有空行 */
+const LONG_INNER = [
+    'Main shot: Medium shot from a slightly low angle, composed in depth with Fang Yikai seated in the foreground.',
+    'Bubble 1 (largest, POV focus): Extreme close-up of Xin Ruohe\'s piercing eyes looking downward.',
+    'Bubble 2 (medium, psychological focus): Extreme close-up of the freshly slapped paper contract.',
+    'Bubble 3 (small, POV focus): Extreme close-up of the console\'s LED volume meter in sharp red peaks.'
+].join('\n\n');
+
+function floorDom(w, mes) {
+    /* 酒馆 messageFormatting 会把空行拆成多个段落 —— 标记就这样被切进了不同文本节点 */
+    const doc = w.document;
+    const mesEl = doc.createElement('div');
+    mesEl.className = 'mes';
+    mesEl.setAttribute('mesid', '0');
+    const txt = doc.createElement('div');
+    txt.className = 'mes_text';
+    txt.innerHTML = mes.split('\n\n').map(s => '<p>' + s + '</p>').join('');
+    mesEl.appendChild(txt);
+    doc.querySelector('#chat').appendChild(mesEl);
+    return txt;
+}
+
+test('per-node replacement cannot handle a marker split across paragraphs', t => {
+    const { w, debug } = fixture(t);
+    const el = floorDom(w, 'image###' + LONG_INNER + '###');
+    /* 逐个文本节点跑正则，每个节点里只有标记的一截 → 一个槽都建不出来。
+       这就是她看到的病状：标记文字赖在楼里，图没地方显示。 */
+    assert.equal(debug.replaceMarkersInDom(el), 0, '复现：逐节点替换建不出槽');
+    assert.equal(el.querySelectorAll('.sdg-slot').length, 0);
+});
+
+test('cross-node replacement turns the split marker into one slot', t => {
+    const { w, debug } = fixture(t);
+    const el = floorDom(w, 'image###' + LONG_INNER + '###');
+
+    assert.equal(debug.replaceMarkersAcrossNodes(el), 1, '跨节点建出 1 个槽');
+    assert.equal(el.querySelectorAll('.sdg-slot').length, 1);
+
+    const tag = el.querySelector('.sdg-slot .sdg-tag').textContent;
+    assert.ok(tag.includes('Main shot'), '第一段在');
+    assert.ok(tag.includes('Bubble 3'), '最后一段也在（不是只截到第一段）');
+
+    /* 标记头尾都不该再留在正文里 */
+    assert.ok(!/image[#＃]{2,}/i.test(el.textContent), '正文里不该再有标记头');
+});
+
+test('cross-node replacement handles two split markers in one floor', t => {
+    const { w, debug } = fixture(t);
+    const el = floorDom(w, 'image###甲\n\n第二段甲###\n\n中间旁白\n\nimage###乙\n\n第二段乙###');
+    assert.equal(debug.replaceMarkersAcrossNodes(el), 2, '两条都建出来');
+    const tags = Array.from(el.querySelectorAll('.sdg-slot .sdg-tag')).map(x => x.textContent);
+    assert.ok(tags[0].includes('甲') && tags[0].includes('第二段甲'));
+    assert.ok(tags[1].includes('乙') && tags[1].includes('第二段乙'));
+    assert.ok(el.textContent.includes('中间旁白'), '标记之间的正文要留着');
+});
+
+test('cross-node replacement leaves surrounding prose alone', t => {
+    const { w, debug } = fixture(t);
+    const el = floorDom(w, '前面的剧情\n\nimage###甲\n\n乙###\n\n后面的剧情');
+    debug.replaceMarkersAcrossNodes(el);
+    assert.ok(el.textContent.includes('前面的剧情'), '标记前的正文保留');
+    assert.ok(el.textContent.includes('后面的剧情'), '标记后的正文保留');
+});
+
+test('cross-node replacement is a no-op when there is no marker', t => {
+    const { w, debug } = fixture(t);
+    const el = floorDom(w, '就是普通剧情\n\n没有任何标记');
+    assert.equal(debug.replaceMarkersAcrossNodes(el), 0, '没标记就别动 DOM');
+    assert.equal(el.querySelectorAll('.sdg-slot').length, 0);
+    assert.ok(el.textContent.includes('普通剧情'));
+});
+
+test('markdown hashes inside the marker body do not cut it short', t => {
+    const { debug } = fixture(t);
+    /* 上一轮把结束符放宽成「两个以上井号」，正文里的 ## 会把标记提前截断。
+       现在首尾井号必须是同一串。 */
+    const got = Array.from(debug.findAllTags('image###a girl ## 还有 ### 更多 内容###'));
+    assert.equal(got.length, 1);
+    assert.ok(got[0].inner.includes('还有'), '内容里的 ## 不该截断标记');
+});
+
+test('renderFloorImage shows the image for a marker split across paragraphs', t => {
+    const mes = 'image###' + LONG_INNER + '###';
+    const msg = {
+        name: 'AI', is_user: false, mes: mes,
+        swipe_id: 0, swipes: [mes], swipe_info: [{ extra: {} }],
+        extra: { sdg_gal: { '0': { '0': { list: ['data:image/png;base64,AAAA'], cur: 0 } } } }
+    };
+    const { w, debug } = fixture(t, {}, [msg]);
+    const el = floorDom(w, mes);
+
+    /* 端到端：她的实际情形 —— 标记跨段 + 图已经生成好了 */
+    assert.equal(debug.renderFloorImage(0), true, '渲染成功');
+    const img = el.querySelector('.sdg-slot img.sdg-img') || el.querySelector('img.sdg-img');
+    assert.ok(img, '图显示出来了（之前这里什么都不做，文字就赖在楼里）');
+    assert.equal(img.getAttribute('src'), 'data:image/png;base64,AAAA');
 });

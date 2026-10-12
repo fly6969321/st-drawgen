@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.0
+ *  生图工坊 · DrawGen v1.8.1
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -30,12 +30,18 @@
  *    其它 —— 延迟框清空不再退成 1800、图片宽度清空不再退成 60（归一化值回显到框里）；
  *      提取超时默认 180 秒（0=不限会锁死）；图片下载带超时与中止；「停止」能掐断并发的生图
  *    面板 —— 手机端整体变矮 60px；修「延迟 / 图片宽度」输入框不齐（格子底边对齐 + 长标签收短）
+ *  · v1.8.1 跨段落的长标记现在能变成图了：酒馆把正文换行渲染成多个段落后，一条跨段的标记
+ *    被切进不同文本节点，逐节点跑正则匹配不到完整标记 —— findAllTags 认得出但 DOM 里建不出槽，
+ *    标记文字赖在楼里、生成好的图没地方显示。新增 Range 跨节点替换 + 槽建不出时图退到楼尾兜底。
+ *    标记首尾井号改为必须同一串（1.8.0 放宽成「两个以上」会被正文里的 ## 提前截断）。
+ *    撤销 1.8.0 擅自把送给副AI的正文上限从 9000 砍到 4000（她的正文本来就长，不该替她做减法）。
+ *    手机端面板再矮 60px。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.0";
+    const VERSION = "1.8.1";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2218,6 +2224,7 @@
             const orphan = el.querySelector("img.sdg-img.sdg-orphan"); if (orphan) orphan.remove();
             /* 2. 楼里已有的标记文本原地转成槽（只碰文本节点，美化插件的 HTML 原样不动） */
             replaceMarkersInDom(el);
+            if (el.querySelectorAll(".sdg-slot").length < tags.length) replaceMarkersAcrossNodes(el);
             /* 3. 还缺的标记（刚注入到楼尾的那条）补一个文本节点再转一次 */
             const made = el.querySelectorAll(".sdg-slot").length;
             for (let k = made; k < tags.length; k++) {
@@ -2405,9 +2412,8 @@
         text = stripImageTag(text);
         text = text.replace(/!\[[^\]]*\]\(\s*data:image\/[^)]*\)/gi, "");
         text = text.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+/g, "");
-        /* 生图只画「此刻这一个画面」，9000 字里前面六千基本用不上，白烧 prefill 拖慢首字。
-           取的是末尾片段，留下的始终是最新剧情。 */
-        const maxLen = 4000;
+        /* 取末尾片段，留下的始终是最新剧情 */
+        const maxLen = 9000;
         if (text.length > maxLen) {
             text = text.slice(text.length - maxLen);
             text = "【注意：以下为正文末尾片段，前文已省略】\n" + text;
@@ -3136,11 +3142,14 @@
 
     /* 楼层 innerHTML 里把标记换成槽；标记文字在 HTML 里可能是原样也可能被转义过，两种都认 */
     function htmlMarkerRegexes() {
-        return markerPairs().map(function (p) {
-            const pre = "(?:" + escRe(p.pre) + "|" + escRe(escHtml(p.pre)) + ")";
-            const suf = "(?:" + escRe(p.suf) + "|" + escRe(escHtml(p.suf)) + ")";
-            return new RegExp(pre + "([\\s\\S]*?)" + suf, "gi");
+        const out = [];
+        markerPairs().forEach(function (p) {
+            out.push(tagRegex(p));
+            /* <draw> 这类在 HTML 里会是实体形式，另备一条 */
+            const ep = escHtml(p.pre), es = escHtml(p.suf);
+            if (ep !== p.pre || es !== p.suf) out.push(tagRegex({ pre: ep, suf: es }));
         });
+        return out;
     }
     function slotHTML(innerHtml) {
         return '<div class="sdg-slot"><div class="sdg-slot-body"></div><div class="sdg-tag">' + innerHtml + '</div></div>';
@@ -3407,7 +3416,7 @@
                     const slot = document.createElement("div");
                     slot.className = "sdg-slot";
                     slot.innerHTML = '<div class="sdg-slot-body"></div><div class="sdg-tag"></div>';
-                    slot.querySelector(".sdg-tag").textContent = String(m[1] || "").trim();
+                    slot.querySelector(".sdg-tag").textContent = String(m[2] || "").trim();
                     frag.appendChild(slot);
                     last = m.index + m[0].length;
                     made++;
@@ -3418,6 +3427,87 @@
             }
         });
         return made;
+    }
+
+    /* 酒馆会把正文里的换行/空行渲染成 <br> 或多个段落，于是一条跨多段的长标记
+       被拆进好几个文本节点，逐节点跑正则就匹配不到完整标记 —— 表现就是
+       findAllTags 认得出（它读的是 msg.mes 字符串），但 DOM 里一个槽都建不出来，
+       标记文字一直留在楼里、生成好的图也没地方显示。
+       这里把容器里的文本节点拼成一条虚拟全文，在上面定位标记，再用 Range 跨节点替换。 */
+    function replaceMarkersAcrossNodes(root) {
+        let made = 0;
+        for (let guard = 0; guard < 40; guard++) {
+            const regs = htmlMarkerRegexes();
+            const map = [];
+            let full = "";
+            const walker = document.createTreeWalker(root, 4 /* SHOW_TEXT */, null);
+            let n;
+            while ((n = walker.nextNode())) {
+                let par = n.parentNode, skip = false;
+                while (par && par !== root) {
+                    const tag = par.nodeName;
+                    if (tag === "SCRIPT" || tag === "STYLE" || tag === "PRE" || tag === "CODE" || tag === "TEXTAREA" ||
+                        (par.classList && par.classList.contains("sdg-slot"))) { skip = true; break; }
+                    par = par.parentNode;
+                }
+                if (skip) continue;
+                const v = n.nodeValue || "";
+                map.push({ node: n, start: full.length, len: v.length });
+                full += v;
+            }
+            if (!full || !map.length) break;
+
+            let hit = null;
+            for (const re of regs) {
+                re.lastIndex = 0;
+                const m = re.exec(full);
+                if (m) { hit = { s: m.index, e: m.index + m[0].length, inner: String(m[2] || "").trim() }; break; }
+            }
+            if (!hit || !hit.inner) break;
+
+            const locate = function (pos) {
+                for (const it of map) {
+                    if (pos >= it.start && pos <= it.start + it.len) return { node: it.node, off: pos - it.start };
+                }
+                const last = map[map.length - 1];
+                return { node: last.node, off: last.len };
+            };
+            const a = locate(hit.s), b = locate(hit.e);
+            try {
+                const range = document.createRange();
+                range.setStart(a.node, a.off);
+                range.setEnd(b.node, b.off);
+                range.deleteContents();
+                const slot = document.createElement("div");
+                slot.className = "sdg-slot";
+                slot.innerHTML = '<div class="sdg-slot-body"></div><div class="sdg-tag"></div>';
+                slot.querySelector(".sdg-tag").textContent = hit.inner;
+                range.insertNode(slot);
+                made++;
+            } catch (e) { log("跨节点替换失败:", e && e.message); break; }
+        }
+        if (made) log("跨节点补建了 " + made + " 个槽");
+        return made;
+    }
+
+    /* 槽建不出来时的兜底：至少把图挂在楼尾，别让她只看到一屏提示词文字 */
+    function showOrphanImage(el, src) {
+        let img = el.querySelector("img.sdg-img.sdg-orphan");
+        if (!src) { if (img) img.remove(); return false; }
+        if (!img) {
+            img = document.createElement("img");
+            img.className = "sdg-img sdg-orphan";
+            img.alt = "生成图片";
+            img.style.maxWidth = "100%";
+            img.style.width = "auto";
+            img.style.height = "auto";
+            img.style.maxHeight = maxImgH();
+            img.style.objectFit = "contain";
+            el.appendChild(img);
+        }
+        if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+        bindImagePreview(img);
+        return true;
     }
 
     function renderFloorImage(idx) {
@@ -3441,35 +3531,25 @@
         /* 正文里没标记：只有「无标记直接生图」留下的图才追加在楼尾 */
         if (!tags.length) {
             qa('#chat .mes[mesid="' + idx + '"] .sdg-slot').forEach(function (x) { x.remove(); });
-            const src = hasAnyImage(msg) ? getImage(msg, 0) : "";
-            let img = el.querySelector("img.sdg-img.sdg-orphan");
-            if (!src) { if (img) img.remove(); return false; }
-            if (!img) {
-                img = document.createElement("img");
-                img.className = "sdg-img sdg-orphan";
-                img.alt = "生成图片";
-                /* 同 fillSlot：楼内图片限高，一屏内可见（固定 px，防键盘挤压缩图） */
-                img.style.maxWidth = "100%";
-                img.style.width = "auto";
-                img.style.height = "auto";
-                img.style.maxHeight = maxImgH();
-                img.style.objectFit = "contain";
-                el.appendChild(img);
-            }
-            if (img.getAttribute("src") !== src) img.setAttribute("src", src);
-            bindImagePreview(img);
-            return true;
+            return showOrphanImage(el, hasAnyImage(msg) ? getImage(msg, 0) : "");
         }
 
         /* 第一遍：文本节点里的标记 → 槽（只碰文本，别的插件的 HTML 原样留着） */
         const have = el.querySelectorAll(".sdg-slot").length;
         if (have < tags.length) {
             replaceMarkersInDom(el);
+            /* 还缺 → 标记大概率被酒馆的换行渲染拆到了多个节点里，跨节点再来一遍 */
+            if (el.querySelectorAll(".sdg-slot").length < tags.length) replaceMarkersAcrossNodes(el);
             const orphan = el.querySelector("img.sdg-img.sdg-orphan"); if (orphan) orphan.remove();
         }
         /* 第二遍：按文档顺序给槽编号，按状态填内容 */
         const slots = Array.prototype.slice.call(el.querySelectorAll(".sdg-slot"));
-        if (!slots.length) return false;
+        if (!slots.length) {
+            /* 两种替换都没建出槽（楼被别的插件改造过等）：图退到楼尾显示 */
+            const src0 = hasAnyImage(msg) ? getImage(msg, 0) : "";
+            if (src0) { log("槽建不出来，图退到楼尾"); return showOrphanImage(el, src0); }
+            return false;
+        }
         slots.forEach(function (slot, i) {
             slot.setAttribute("data-i", String(i));
             const body = slot.querySelector(".sdg-slot-body");
@@ -3701,14 +3781,19 @@
         const mPre = /^([\s\S]*?)([#＃]{2,})$/.exec(p.pre);
         const mSuf = /^([#＃]{2,})$/.exec(p.suf);
         if (mPre && mSuf) {
-            const open = escRe(mPre[1]) + HASH + "{2,}";
-            return new RegExp(open + "((?:(?!" + open + ")[\\s\\S])*?)" + HASH + "{2,}", flags || "gi");
+            const head = escRe(mPre[1]);
+            const open = head + HASH + "{2,}";
+            /* 捕获开头那串井号，结尾用反向引用要求同一串：正文里出现 ## 或 ###
+               （markdown 标题之类）就不会把标记提前截断。内层另外禁止再出现前缀，
+               漏写闭合时不至于把后面那个完好的标记吞掉。 */
+            return new RegExp(head + "(" + HASH + "{2,})((?:(?!" + open + ")[\\s\\S])*?)\\1", flags || "gi");
         }
         const pre = escRe(p.pre), suf = escRe(p.suf);
         const inner = p.pre.indexOf(p.suf) >= 0
             ? "((?:(?!" + pre + ")[\\s\\S])*?)"
             : "([\\s\\S]*?)";
-        return new RegExp(pre + inner + suf, flags || "gi");
+        /* 空捕获组占位，让正文内容在两个分支里都落在 m[2] */
+        return new RegExp(pre + "()" + inner + suf, flags || "gi");
     }
 
     let mpCache = null, mpCacheKey = "";
@@ -3744,7 +3829,7 @@
             const re = tagRegex(p);
             let m;
             while ((m = re.exec(t)) !== null) {
-                const inner = String(m[1] || "").trim();
+                const inner = String(m[2] || "").trim();
                 if (!inner) continue;
                 found.push({ start: m.index, full: m[0], inner: inner, pre: p.pre, suf: p.suf });
             }
@@ -3768,7 +3853,7 @@
         for (const p of markerPairs()) {
             try {
                 const m = tagRegex(p, "i").exec(t);
-                if (m && m.index === 0 && m[0].length === t.length) return String(m[1] || "").trim();
+                if (m && m.index === 0 && m[0].length === t.length) return String(m[2] || "").trim();
             } catch (e) {}
         }
         for (const p of markerPairs()) {
@@ -4738,7 +4823,7 @@
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
-            trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs
+            trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes
         };
     }
 
