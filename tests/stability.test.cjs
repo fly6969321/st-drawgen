@@ -178,16 +178,33 @@ test('clearing the image-width box falls back to 100, not the old 60', t => {
     assert.equal(settings.imageMaxWidth, 100, '上限封到 100');
 });
 
-test('extraction timeout defaults to a finite value and old zeros get migrated', t => {
+test('extraction timeout stays unlimited by default and the forced 180 is rolled back', t => {
+    /* 0 = 不限 是她原来的行为。thinking 模型想得久，强塞 180 秒会把慢站点掐断
+       （"一个站点就是一直提取不了"）。死锁交给看门狗兜，不替她改请求行为。 */
     const fresh = fixture(t, {});
-    assert.equal(fresh.settings.requestTimeout, 180, '新安装默认 180 秒');
+    assert.equal(fresh.settings.requestTimeout, 0, '新安装默认不限');
 
-    /* 0 = 不限 会在中转站吞连接时把提取锁死（按钮永久灰），属于病根不是偏好 */
-    const old = fixture(t, { requestTimeout: 0 });
-    assert.equal(old.settings.requestTimeout, 180, '老配置里的 0 抬成 180');
+    /* 1.8.1 的迁移把老的 0 抬成了 180，要回退掉 */
+    const migrated = fixture(t, { requestTimeout: 180, migrated173: true });
+    assert.equal(migrated.settings.requestTimeout, 0, '迁移强加的 180 退回 0');
 
+    /* 她自己填的值一概不动 */
     const custom = fixture(t, { requestTimeout: 90, migrated173: true });
-    assert.equal(custom.settings.requestTimeout, 90, '她自己设过的值不动');
+    assert.equal(custom.settings.requestTimeout, 90, '她自己设过的 90 不动');
+    const custom2 = fixture(t, { requestTimeout: 240, migrated173: true, migrated182: true });
+    assert.equal(custom2.settings.requestTimeout, 240, '已回退过就不再碰');
+});
+
+test('the timeout box accepts 0 as "unlimited"', t => {
+    const { w, settings } = fixture(t);
+    const el = w.document.querySelector('#sdg-timeout');
+    assert.ok(el, '超时框渲染了');
+    el.value = '0';
+    el.dispatchEvent(new w.Event('change', { bubbles: true }));
+    assert.equal(settings.requestTimeout, 0, '0 必须能存进去（= 不限），别被归一化成默认值');
+    el.value = '300';
+    el.dispatchEvent(new w.Event('change', { bubbles: true }));
+    assert.equal(settings.requestTimeout, 300);
 });
 
 /* ── 分层 NO_CHANGE 不该静默抹空 ──────────────────────────── */
@@ -247,13 +264,25 @@ test('fetchWithTimeout keeps guarding while the body is read', t => {
     assert.ok(!/timeoutMs < 30000/.test(fn), '不许把她填的小超时静默抬到 30 秒');
 });
 
-test('extraction request caps its output length', t => {
+test('extraction request must NOT cap output tokens', t => {
     const fn = source.slice(source.indexOf('async function callSubAI'),
                             source.indexOf('function directHeaders'));
-    assert.ok(/max_tokens: \d+/.test(fn), '请求体要封顶输出，不封顶时每多 100 个 token 就多等几秒');
-    /* 代理通道也得带上，不然开了代理就等于没封顶 */
-    const proxy = fn.slice(fn.indexOf('chat_completion_source'));
-    assert.ok(/max_tokens/.test(proxy), '代理通道也要封顶');
+    /* 1.8.1 我加过 max_tokens: 800 提速，结果 thinking 模型光思考就吃满额度、
+       正文一个字挤不出来：要么退去读 reasoning_content 当提示词（状态条显示
+       「副AI没按分层输出，已整段兜底」、预览框里是一段思考），要么直接
+       「无法解析响应」。她的站点配的就是 thinking 模型，当场提取全废。
+       这条断言就是防止谁再把它加回来。 */
+    /* 只认真正的赋值，别被注释里提到这个词的句子误判（ASCII 冒号 + 数字/变量） */
+    assert.ok(!/max_tokens\s*:\s*[\w.]/.test(fn), '不许给提取请求加输出上限——会把 thinking 模型的正文掐死');
+});
+
+test('a thinking-only response produces a readable error, not raw JSON', t => {
+    /* 正文空但有思考内容时，要告诉她「模型只输出了思考」，而不是甩一串原始 JSON */
+    const fn = source.slice(source.indexOf('async function callSubAI'),
+                            source.indexOf('function directHeaders'));
+    assert.ok(/hadReasoning/.test(fn), '要识别「只有思考没有正文」这种情况');
+    assert.ok(/只输出了思考内容/.test(fn), '错误消息要说人话');
+    assert.ok(/finish_reason=length/.test(fn), '被截断时也要说清');
 });
 
 test('her source text is not truncated below the long-standing 9000 limit', t => {

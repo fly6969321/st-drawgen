@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.1
+ *  生图工坊 · DrawGen v1.8.2
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -35,13 +35,21 @@
  *    标记文字赖在楼里、生成好的图没地方显示。新增 Range 跨节点替换 + 槽建不出时图退到楼尾兜底。
  *    标记首尾井号改为必须同一串（1.8.0 放宽成「两个以上」会被正文里的 ## 提前截断）。
  *    撤销 1.8.0 擅自把送给副AI的正文上限从 9000 砍到 4000（她的正文本来就长，不该替她做减法）。
- *    手机端面板再矮 60px。
+*    手机端面板再矮 60px。
+ *  · v1.8.2 回滚 1.8.1 两处我擅自改的提取行为（它们当场把提取搞坏了）：
+ *    ① 去掉 max_tokens —— thinking 系模型光思考就吃满额度，正文一个字挤不出来：
+ *       要么退去读 reasoning_content 当提示词（状态条「副AI没按分层输出，已整段兜底」、
+ *       预览框里是一段思考），要么连 content 都是空的直接「无法解析响应」甩原始 JSON。
+ *    ② 提取「超时」默认回 0（不限）并回退那次把老配置 0 抬成 180 的迁移 ——
+ *       thinking 模型想得久，180 秒会把慢站点整个掐断。死锁交给看门狗兜（看门狗只解锁和提示，
+ *       不中断在跑的请求），不该替她改请求行为。
+ *    另：解析失败时说人话（「只输出了思考内容」/「正文被截断」），不再只甩一串原始 JSON。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.1";
+    const VERSION = "1.8.2";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -86,7 +94,7 @@
         extAnchors: "",
         anchorGuideOn: true,
         extProxy: false,
-        requestTimeout: 180,
+        requestTimeout: 0,
         retryOnce: true,
         // —— 分层 ——
         layered: false,
@@ -1297,10 +1305,12 @@
                 if (st[k] === undefined) st[k] = (v && typeof v === "object") ? Object.assign({}, v) : v;
             }
             if (!st.layerLocks || typeof st.layerLocks !== "object") st.layerLocks = {};
-            /* 1.7.3：提取超时 0=不限 会在中转站吞连接时把提取锁死（按钮永久灰），抬成 180 秒 */
-            if (!st.migrated173) {
-                if (!Number(st.requestTimeout) || Number(st.requestTimeout) <= 0) st.requestTimeout = 180;
-                st.migrated173 = true;
+            /* 1.8.2：撤销 1.8.1 那次把「超时」从 0 强抬到 180 的迁移。
+               thinking 模型想得久，180 秒会把慢站点掐断；锁死问题交给看门狗兜，
+               不该替她改请求行为。只回退迁移写进去的那个 180，她自己填的值不动。 */
+            if (st.migrated173 && !st.migrated182) {
+                if (Number(st.requestTimeout) === 180) st.requestTimeout = 0;
+                st.migrated182 = true;
             }
             /* 1.5：楼层图默认撑满楼层宽度 */
             if (!st.migrated15) {
@@ -2492,10 +2502,10 @@
                 { role: "user", content: buildVisionUserPrompt(text, supplement || "", layerOpts) }
             ],
             temperature: 0.4,
-            stream: false,
-            /* 输出封顶：六层合起来一两百 token 就够，不封顶时模型可能一路写下去，
-               每多 100 个输出 token 就多等好几秒 */
-            max_tokens: 800
+            stream: false
+            /* 不要在这里加 max_tokens：thinking 系模型光思考就能吃满额度，
+               正文一个字也挤不出来 —— 表现是「没按分层输出，已整段兜底」
+               （退去读 reasoning_content 当提示词）或直接「无法解析响应」。 */
         };
 
         let url, headers, reqBody;
@@ -2509,7 +2519,6 @@
                 model: c.extModel,
                 messages: body.messages,
                 temperature: body.temperature,
-                max_tokens: body.max_tokens,
                 stream: false
             };
         } else {
@@ -2540,9 +2549,16 @@
         const out = parseChatResponse(data);
         if (out) return out;
 
-        let finish = "";
-        try { if (data.choices && data.choices[0] && data.choices[0].finish_reason) finish = data.choices[0].finish_reason; } catch (e) {}
-        if (finish === "length") throw new Error("模型返回为空，finish_reason=length，服务端截断了输出。原始返回：" + raw.slice(0, 180));
+        let finish = "", hadReasoning = false;
+        try {
+            const ch0 = data.choices && data.choices[0];
+            if (ch0 && ch0.finish_reason) finish = ch0.finish_reason;
+            const m0 = ch0 && ch0.message;
+            hadReasoning = !!(m0 && ((m0.reasoning_content && String(m0.reasoning_content).trim()) ||
+                                     (m0.reasoning && String(m0.reasoning).trim())));
+        } catch (e) {}
+        if (finish === "length") throw new Error("模型只顾着思考，正文被截断了（finish_reason=length）。换个不思考的模型，或把站点的输出上限调高。原始返回：" + raw.slice(0, 160));
+        if (hadReasoning) throw new Error("模型只输出了思考内容、没给正文。换个不思考的模型试试。原始返回：" + raw.slice(0, 160));
         throw new Error("无法解析响应：" + raw.slice(0, 220));
     }
 
@@ -3620,7 +3636,10 @@
         /* 看门狗：万一请求既不返回也不抛错（中转站吞连接），finally 永不执行，
            processing 会一直是 true —— 之后每次自动提取都在上面那行被静默吞掉、
            提取按钮永久变灰。这里兜住，到点强制解锁并说清原因。 */
-        const guardMs = (Math.max(10, Number(cfg().requestTimeout) || 180) + 30) * 1000;
+        /* 超时填了就按它 +30 秒；填 0（不限）按 10 分钟兜底 —— 只为了防死锁，
+           不是给请求设时限（看门狗只解锁和提示，不中断在跑的请求） */
+        const rt = Number(cfg().requestTimeout) || 0;
+        const guardMs = (rt > 0 ? rt + 30 : 600) * 1000;
         let guard = setTimeout(function () {
             guard = null;
             if (!processing) return;
@@ -4327,7 +4346,7 @@
                     '<div class="sdg-hint">默认 image###{Description}###　分层可用 {Camera} {Env} {Mood} {Chars} {Outfit} {Pose}</div>' +
                     chk("sdg-ext-proxy", "extProxy", "走酒馆后端代理") +
                     chk("sdg-retry", "retryOnce", "自动提取失败 10 秒后重试一次") +
-                    field("超时（秒）", textInput("sdg-timeout", "requestTimeout", "180", "number")) +
+                    field("超时（秒，0 = 不限）", textInput("sdg-timeout", "requestTimeout", "0", "number")) +
                 '</section>' +
             '</div>' +
         '</div>';
@@ -4497,7 +4516,13 @@
         bindText("#sdg-template", "template");
         bindChk("#sdg-ext-proxy", "extProxy");
         bindChk("#sdg-retry", "retryOnce");
-        numField("#sdg-timeout", "requestTimeout", 180, 10, null, null);
+        /* 这格允许 0（= 不限），所以不走 numField 的「0 退回默认」那套 */
+        q("#sdg-timeout").addEventListener("change", function (ev) {
+            const raw = Number(ev.target.value);
+            const v = Number.isFinite(raw) && raw > 0 ? Math.max(10, raw) : 0;
+            save("requestTimeout", v);
+            if (String(v) !== String(ev.target.value)) ev.target.value = v;
+        });
 
         const sysSel = q("#sdg-sys-select");
         const sysVal = q("#sdg-sys-value");
