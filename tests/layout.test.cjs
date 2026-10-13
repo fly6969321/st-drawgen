@@ -93,7 +93,9 @@ test('the delay label is short enough not to wrap next to 图片宽度', t => {
     const m = source.match(/<div class="sdg-grid2">([\s\S]*?)<\/div>'/);
     assert.ok(m, '找到 sdg-grid2 那一段');
     const fields = m[1].match(/field\(/g) || [];
-    assert.equal(fields.length, 3, '这一行仍是三个字段：延迟 / 图片宽度 / 生图超时');
+    assert.equal(fields.length, 4, '延迟 / 图片宽度 / 生图超时 / 存图天数');
+    /* 两列网格，字段数是偶数才刚好填满、不多占一行 —— 面板高度是她在意的 */
+    assert.equal(fields.length % 2, 0, '字段数保持偶数，否则最后一行只剩半格、白占高度');
 });
 
 test('grid cells really end on the same line once rendered', t => {

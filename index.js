@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.2
+ *  生图工坊 · DrawGen v1.8.3
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -44,12 +44,16 @@
  *       thinking 模型想得久，180 秒会把慢站点整个掐断。死锁交给看门狗兜（看门狗只解锁和提示，
  *       不中断在跑的请求），不该替她改请求行为。
  *    另：解析失败时说人话（「只输出了思考内容」/「正文被截断」），不再只甩一串原始 JSON。
+ *  · v1.8.3 旧图清理：新增「存图天数」（默认 7，0 = 不清理）。超期的图连服务器文件一起删，
+ *    聊天里的引用同时摘掉，摘空的槽恢复成「生成图片」按钮可重新生成。
+ *    年龄取自文件名里的毫秒时间戳（sdg_<ts>_…），所以只认插件自己生成的图 ——
+ *    她自己传的图、别人插件的图、内嵌 base64 一律不碰。切聊天/启动后触发，内部 12 小时节流。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.2";
+    const VERSION = "1.8.3";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -118,6 +122,8 @@
         genProxy: false,
         genTimeout: 300,
         convertToJpeg: false,
+        imageKeepDays: 7,          // 只保留这么多天内的图，超期的连服务器文件一起删；0 = 不清理
+        imageCleanAt: 0,           // 上次清理时间，半天跑一次就够
         showImage: true,
         imageMaxWidth: 100,
         // —— 界面 ——
@@ -3033,6 +3039,106 @@
         } catch (e) { log("图片上传异常，保留内嵌存储:", e && e.message); return imageUrl; }
     }
 
+    /* ——— 旧图清理 ———
+       生成的图存在酒馆服务器的 images 目录里（聊天只留路径），但删楼/删聊天/重画
+       都不会删文件，磁盘会一直涨。这里按文件名里的时间戳清掉超期的图：
+       文件和聊天里的引用一起摘，摘空的槽恢复成「生成图片」按钮，可以重新生成。
+       只认插件自己生成的文件名（sdg_<毫秒时间戳>_…），别人的图一概不碰。 */
+    function sdgFileTime(p) {
+        const m = /sdg_(\d{10,})_/.exec(String(p || ""));
+        if (!m) return 0;
+        const t = Number(m[1]);
+        return Number.isFinite(t) && t > 1000000000000 && t < 4000000000000 ? t : 0;
+    }
+    async function deleteServerImage(relPath) {
+        const c = ctx();
+        if (!c || typeof c.getRequestHeaders !== "function") return false;
+        try {
+            const res = await fetch("/api/images/delete", {
+                method: "POST", headers: c.getRequestHeaders(),
+                body: JSON.stringify({ path: String(relPath || "").replace(/^\/+/, "") })
+            });
+            /* 404 = 文件本来就没了，照样算清掉 */
+            return res.ok || res.status === 404;
+        } catch (e) { log("删图失败:", e && e.message); return false; }
+    }
+    /* 摘掉当前聊天里指向超期图的引用，返回摘掉的路径 */
+    function dropExpiredRefs(cutoff) {
+        const dropped = [];
+        try {
+            (ctx().chat || []).forEach(function (msg) {
+                const g = msg && msg.extra && msg.extra.sdg_gal;
+                if (!g || typeof g !== "object") return;
+                let touched = false;
+                for (const sk in g) {
+                    const sw = g[sk];
+                    if (!sw || typeof sw !== "object") continue;
+                    for (const slot in sw) {
+                        const r = sw[slot];
+                        if (!r || !Array.isArray(r.list)) continue;
+                        const keep = r.list.filter(function (u) {
+                            const t = sdgFileTime(u);
+                            if (t && t < cutoff) { dropped.push(u); return false; }
+                            return true;
+                        });
+                        if (keep.length === r.list.length) continue;
+                        touched = true;
+                        if (keep.length) {
+                            r.list = keep;
+                            r.cur = Math.min(Math.max(Number(r.cur) || 0, 0), keep.length - 1);
+                        } else delete sw[slot];
+                    }
+                    if (!Object.keys(sw).length) delete g[sk];
+                }
+                if (touched) syncSwipeExtra(msg);
+            });
+        } catch (e) { log("摘引用出错:", e && e.message); }
+        return dropped;
+    }
+    async function cleanupOldImages(force) {
+        const days = Number(cfg().imageKeepDays) || 0;
+        if (days <= 0) return 0;
+        const now = Date.now();
+        if (!force && now - (Number(cfg().imageCleanAt) || 0) < 12 * 3600 * 1000) return 0;
+        save("imageCleanAt", now);
+        const cutoff = now - days * 86400000;
+
+        const dropped = dropExpiredRefs(cutoff);
+        if (dropped.length) { persistChat("清理旧图"); try { renderAllImages(); } catch (e) {} }
+
+        /* 服务器文件：列出 images 下各子目录逐个筛。
+           路径格式跟上传时存下来的一致（images/<目录>/<文件>），删除端点认这个。 */
+        let killed = 0;
+        try {
+            const c = ctx();
+            if (c && typeof c.getRequestHeaders === "function") {
+                const fr = await fetch("/api/images/folders", { method: "POST", headers: c.getRequestHeaders(), body: "{}" });
+                const folders = fr.ok ? await fr.json() : [];
+                for (const folder of (Array.isArray(folders) ? folders : [])) {
+                    const lr = await fetch("/api/images/list", {
+                        method: "POST", headers: c.getRequestHeaders(),
+                        body: JSON.stringify({ folder: folder, sortField: "name" })
+                    });
+                    if (!lr.ok) continue;
+                    const files = await lr.json();
+                    for (const f of (Array.isArray(files) ? files : [])) {
+                        const name = String(typeof f === "string" ? f : (f && (f.name || f.path) || ""));
+                        if (!name) continue;
+                        const t = sdgFileTime(name);
+                        if (!t || t >= cutoff) continue;
+                        if (await deleteServerImage("images/" + folder + "/" + name.replace(/^.*\//, ""))) killed++;
+                    }
+                }
+            }
+        } catch (e) { log("清理文件出错:", e && e.message); }
+
+        if (dropped.length || killed) {
+            log("清理旧图：摘引用 " + dropped.length + " 条，删文件 " + killed + " 个（保留 " + days + " 天内）");
+            setStatus("已清掉 " + killed + " 张超过 " + days + " 天的图", C_OK);
+        }
+        return killed;
+    }
+
     /* 画风段处理：分层生图时把前缀脚手架里的 {Camera}/{Env}/{Mood}/{Chars}/{Outfit}/{Pose}
        填成当楼层的值（预设包导入的画风前缀就是这种结构）；非分层或仍有未填占位符时整段跳过，
        绝不把 {Camera} 之类的字面占位符发给站点。 */
@@ -4295,8 +4401,9 @@
                         field("延迟（毫秒）", textInput("sdg-delay", "autoDelay", "", "number")) +
                         field("图片宽度（%）", textInput("sdg-imgw", "imageMaxWidth", "", "number")) +
                         field("生图超时（秒）", textInput("sdg-gen-timeout", "genTimeout", "300", "number")) +
+                        field("存图天数", textInput("sdg-keepdays", "imageKeepDays", "7", "number")) +
                     '</div>' +
-                    '<div class="sdg-hint">生图超过该秒数自动停止且不补发（避免重复扣费）；「停止」按钮同样立即掐断</div>' +
+                    '<div class="sdg-hint">生图超过该秒数自动停止且不补发（避免重复扣费）；「停止」按钮同样立即掐断。存图天数：超期的图连服务器文件一起删，0 = 不清理</div>' +
 
                     '<h5>插件</h5>' +
                     chk("sdg-enabled", "enabled", "启用生图工坊") +
@@ -4504,6 +4611,13 @@
         };
         numField("#sdg-delay", "autoDelay", 800, 100, null, null);
         numField("#sdg-imgw", "imageMaxWidth", 100, 10, 100, applyImageWidth);
+        /* 这格允许 0（= 不清理），跟超时那格一样不走「0 退回默认」 */
+        q("#sdg-keepdays").addEventListener("change", function (ev) {
+            const raw = Number(ev.target.value);
+            const v = Number.isFinite(raw) && raw > 0 ? Math.max(1, Math.round(raw)) : 0;
+            save("imageKeepDays", v);
+            if (String(v) !== String(ev.target.value)) ev.target.value = v;
+        });
         numField("#sdg-gen-timeout", "genTimeout", 300, 30, null, null);
         bindChk("#sdg-enabled", "enabled", function () { syncDrawer(); });
         bindChk("#sdg-show-ball", "showBall", function () { applyBallVisible(); syncDrawer(); });
@@ -4785,11 +4899,13 @@
                 c.eventSource.on(c.event_types.CHAT_CHANGED, function () {
                     currentIdx = -1; layersFresh = false;
                     setTimeout(function () { renderAllImages(); installMesButtons(); }, 300);
+                    setTimeout(function () { cleanupOldImages(false); }, 4000);
                 });
             }
             if (c.event_types.APP_READY) {
                 c.eventSource.on(c.event_types.APP_READY, function () {
                     setTimeout(function () { renderAllImages(); installMesButtons(); }, 500);
+                    setTimeout(function () { cleanupOldImages(false); }, 8000);
                 });
             }
         }
@@ -4848,7 +4964,7 @@
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
-            trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes
+            trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages
         };
     }
 

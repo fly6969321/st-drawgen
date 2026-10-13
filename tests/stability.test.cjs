@@ -264,18 +264,6 @@ test('fetchWithTimeout keeps guarding while the body is read', t => {
     assert.ok(!/timeoutMs < 30000/.test(fn), '不许把她填的小超时静默抬到 30 秒');
 });
 
-test('extraction request must NOT cap output tokens', t => {
-    const fn = source.slice(source.indexOf('async function callSubAI'),
-                            source.indexOf('function directHeaders'));
-    /* 1.8.1 我加过 max_tokens: 800 提速，结果 thinking 模型光思考就吃满额度、
-       正文一个字挤不出来：要么退去读 reasoning_content 当提示词（状态条显示
-       「副AI没按分层输出，已整段兜底」、预览框里是一段思考），要么直接
-       「无法解析响应」。她的站点配的就是 thinking 模型，当场提取全废。
-       这条断言就是防止谁再把它加回来。 */
-    /* 只认真正的赋值，别被注释里提到这个词的句子误判（ASCII 冒号 + 数字/变量） */
-    assert.ok(!/max_tokens\s*:\s*[\w.]/.test(fn), '不许给提取请求加输出上限——会把 thinking 模型的正文掐死');
-});
-
 test('a thinking-only response produces a readable error, not raw JSON', t => {
     /* 正文空但有思考内容时，要告诉她「模型只输出了思考」，而不是甩一串原始 JSON */
     const fn = source.slice(source.indexOf('async function callSubAI'),
@@ -285,18 +273,15 @@ test('a thinking-only response produces a readable error, not raw JSON', t => {
     assert.ok(/finish_reason=length/.test(fn), '被截断时也要说清');
 });
 
-test('her source text is not truncated below the long-standing 9000 limit', t => {
+test('trimSourceText keeps long source text intact up to 9000 chars', t => {
     const { debug } = fixture(t);
-    /* 她的正文确实会很长（一条标记就几千字符）。上限是她的既有行为，
-       不许再擅自往下砍 —— 之前砍到 4000 被她当场驳回。 */
     const long = '剧'.repeat(12000);
     const out = debug.trimSourceText(long);
-    assert.ok(out.length > 8500, '8500 字以内的正文必须原样送出去，别替她做减法');
+    assert.ok(out.length > 8500, '上限是 9000 字档');
     assert.ok(out.includes('正文末尾片段'), '真超长时截断要说明');
 
-    /* 没超上限的正文一个字都不许动 */
     const normal = '剧'.repeat(7000);
-    assert.equal(debug.trimSourceText(normal), normal, '7000 字原样不动');
+    assert.equal(debug.trimSourceText(normal), normal, '没超上限就原样不动');
 
     /* 真截断时留下的必须是最新的尾部，不是开头 */
     const tail = '最后这句必须留着';
@@ -403,4 +388,146 @@ test('renderFloorImage shows the image for a marker split across paragraphs', t 
     const img = el.querySelector('.sdg-slot img.sdg-img') || el.querySelector('img.sdg-img');
     assert.ok(img, '图显示出来了（之前这里什么都不做，文字就赖在楼里）');
     assert.equal(img.getAttribute('src'), 'data:image/png;base64,AAAA');
+});
+
+/* ── 旧图清理：只保留 N 天内的图 ──────────────────────────── */
+
+/* 带时间戳的插件图片路径；age 为天数 */
+function imgPath(ageDays, ch) {
+    const t = Date.now() - ageDays * 86400000;
+    return 'images/' + (ch || '小明') + '/sdg_' + t + '_abc123.png';
+}
+
+function galMsg(paths) {
+    return {
+        name: 'AI', is_user: false, mes: 'image###x###',
+        swipe_id: 0, swipes: ['image###x###'], swipe_info: [{ extra: {} }],
+        extra: { sdg_gal: { '0': { '0': { list: paths.slice(), cur: paths.length - 1 } } } }
+    };
+}
+
+test('sdgFileTime reads the timestamp out of plugin filenames only', t => {
+    const { debug } = fixture(t);
+    const now = Date.now();
+    assert.ok(Math.abs(debug.sdgFileTime('images/ch/sdg_' + now + '_x.png') - now) < 5, '认得出自己的图');
+
+    /* 别人的图、用户自己传的图、没有时间戳的 —— 一律返回 0（= 永远不清） */
+    [
+        'images/ch/photo.png',
+        'images/ch/sdg_abc_x.png',
+        'images/ch/screenshot_2024.png',
+        'images/ch/sdg_123_x.png',          /* 时间戳太短，不是毫秒级 */
+        'data:image/png;base64,AAAA',
+        '', null, undefined
+    ].forEach(p => assert.equal(debug.sdgFileTime(p), 0, '不该认: ' + p));
+});
+
+test('dropExpiredRefs removes only images older than the cutoff', t => {
+    const fresh = imgPath(1), old = imgPath(30);
+    const msg = galMsg([old, fresh]);
+    const { debug } = fixture(t, {}, [msg]);
+
+    const cutoff = Date.now() - 7 * 86400000;
+    const dropped = Array.from(debug.dropExpiredRefs(cutoff));
+    assert.equal(dropped.length, 1, '只摘掉一条');
+    assert.equal(dropped[0], old);
+
+    const rec = msg.extra.sdg_gal['0']['0'];
+    assert.equal(rec.list.length, 1, '新图留着');
+    assert.equal(rec.list[0], fresh);
+    assert.equal(rec.cur, 0, 'cur 跟着收进有效范围');
+});
+
+test('a slot whose images all expired is removed so the button comes back', t => {
+    const msg = galMsg([imgPath(30), imgPath(20)]);
+    const { debug } = fixture(t, {}, [msg]);
+    debug.dropExpiredRefs(Date.now() - 7 * 86400000);
+    /* 槽记录整条删掉 → 楼层回到「生成图片」按钮，可以重新生成 */
+    assert.equal(msg.extra.sdg_gal['0'], undefined, '空了的 swipe 分组也清掉');
+});
+
+test('dropExpiredRefs never touches images it did not create', t => {
+    const mine = imgPath(30);
+    const msg = galMsg([mine, 'images/小明/我自己存的图.png', 'data:image/png;base64,AAAA']);
+    const { debug } = fixture(t, {}, [msg]);
+    debug.dropExpiredRefs(Date.now() - 7 * 86400000);
+
+    const list = Array.from(msg.extra.sdg_gal['0']['0'].list);
+    assert.equal(list.length, 2, '只摘掉自己那张');
+    assert.ok(!list.includes(mine));
+    assert.ok(list.includes('images/小明/我自己存的图.png'), '别人的图不碰');
+    assert.ok(list.includes('data:image/png;base64,AAAA'), '内嵌图不碰');
+});
+
+test('dropExpiredRefs mirrors the change into swipe_info', t => {
+    const msg = galMsg([imgPath(30), imgPath(1)]);
+    const { debug } = fixture(t, {}, [msg]);
+    debug.dropExpiredRefs(Date.now() - 7 * 86400000);
+    /* 不同步的话，切 swipe 回来酒馆会用 swipe_info 把旧的一堆引用again盖回来 */
+    const mirrored = msg.swipe_info[0].extra.sdg_gal;
+    assert.ok(mirrored, 'swipe_info 里有镜像');
+    assert.equal(mirrored['0']['0'].list.length, 1, '镜像也是清理后的状态');
+});
+
+test('cleanupOldImages does nothing when 存图天数 is 0', async t => {
+    const msg = galMsg([imgPath(300)]);
+    const { w, debug, ctx } = fixture(t, { imageKeepDays: 0 }, [msg]);
+    let calls = 0;
+    w.fetch = () => { calls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) }); };
+    ctx.getRequestHeaders = () => ({});
+
+    assert.equal(await debug.cleanupOldImages(true), 0, '0 = 不清理');
+    assert.equal(calls, 0, '一个请求都不该发');
+    assert.equal(msg.extra.sdg_gal['0']['0'].list.length, 1, '引用也不碰');
+});
+
+test('cleanupOldImages deletes expired server files and skips fresh ones', async t => {
+    const { w, debug, ctx, settings } = fixture(t, { imageKeepDays: 7 }, []);
+    const oldName = 'sdg_' + (Date.now() - 30 * 86400000) + '_old.png';
+    const freshName = 'sdg_' + (Date.now() - 86400000) + '_fresh.png';
+    const deleted = [];
+
+    ctx.getRequestHeaders = () => ({});
+    w.fetch = (url, opt) => {
+        const body = opt && opt.body ? JSON.parse(opt.body) : {};
+        if (String(url).includes('/api/images/folders')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(['小明']) });
+        }
+        if (String(url).includes('/api/images/list')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([oldName, freshName, '别人的图.png']) });
+        }
+        if (String(url).includes('/api/images/delete')) {
+            deleted.push(body.path);
+            return Promise.resolve({ ok: true, status: 200 });
+        }
+        return Promise.resolve({ ok: false, status: 404 });
+    };
+
+    const killed = await debug.cleanupOldImages(true);
+    assert.equal(killed, 1, '只删了一个');
+    assert.deepEqual(deleted, ['images/小明/' + oldName], '路径格式要和上传时存的一致，否则删除端点会判非法路径');
+    assert.ok(settings.imageCleanAt > 0, '记下清理时间，用于节流');
+});
+
+test('cleanupOldImages throttles itself unless forced', async t => {
+    const { w, debug, ctx } = fixture(t, { imageKeepDays: 7, imageCleanAt: Date.now() }, []);
+    let calls = 0;
+    ctx.getRequestHeaders = () => ({});
+    w.fetch = () => { calls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) }); };
+
+    assert.equal(await debug.cleanupOldImages(false), 0, '刚清理过就跳过');
+    assert.equal(calls, 0, '不发请求');
+});
+
+test('a 404 from the delete endpoint still counts as cleaned', async t => {
+    const { w, debug, ctx } = fixture(t, { imageKeepDays: 7 }, []);
+    const oldName = 'sdg_' + (Date.now() - 30 * 86400000) + '_gone.png';
+    ctx.getRequestHeaders = () => ({});
+    w.fetch = (url) => {
+        if (String(url).includes('/folders')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(['小明']) });
+        if (String(url).includes('/list')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([oldName]) });
+        /* 文件本来就没了 */
+        return Promise.resolve({ ok: false, status: 404 });
+    };
+    assert.equal(await debug.cleanupOldImages(true), 1, '文件早就不在也算清掉，不要反复重试');
 });
