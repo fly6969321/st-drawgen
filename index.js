@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.3
+ *  生图工坊 · DrawGen v1.8.4
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -48,12 +48,22 @@
  *    聊天里的引用同时摘掉，摘空的槽恢复成「生成图片」按钮可重新生成。
  *    年龄取自文件名里的毫秒时间戳（sdg_<ts>_…），所以只认插件自己生成的图 ——
  *    她自己传的图、别人插件的图、内嵌 base64 一律不碰。切聊天/启动后触发，内部 12 小时节流。
+ *  · v1.8.4 GPT 渠道两处排雷 + 删标记连图一起清：
+ *    ① 「内容被审核拒」GPT 系回的是 400（偶尔 403）+ moderation_blocked /
+ *       content_policy_violation / safety system，原先被当成「chat 接口不通」，
+ *       拿同一个提示词又退去 images 打一发 —— 一次生图两次被拒、耗时翻倍、safe 看两遍。
+ *       这类错误现在立刻停（Grok 不做内容审核，走不到这条路，所以那边一直正常）。
+ *    ② 失败提示原先印成「生图失败 400：生图失败 / …」（前缀被当成站点原话、通道标识丢了），
+ *       现在是「生图失败 400（chat）：站点原话」，状态码仍排在最前面。
+ *    ③ 删掉正文里那一整条 image###…### 标记，图跟着清（图库记录 + 服务器文件）。
+ *       图本来存在 extra.sdg_gal 里，跟正文是两回事，所以原先删了标记图会被贴到楼尾，
+ *       手动删 DOM 里的图也会被观察器贴回来。一楼多条标记时，删一条就清掉尾巴上多出来的那张。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.3";
+    const VERSION = "1.8.4";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2816,15 +2826,28 @@
         if (!detail) detail = String(body == null ? "" : body).replace(/\s+/g, " ").trim();
         return "HTTP " + status + "：" + (String(detail || "").slice(0, 140) || "站点未返回原因");
     }
-    function siteErrorText(status, body) { return "生图失败 " + siteErrorBrief(status, body); }
-    /* 统一出口：超时/取消原样，HTTP 错误转「状态码 + 站点原话」，其余保留 */
+    /* 内容被站点审核拒了：GPT 系回的就是 400 + moderation_blocked / content_policy_violation /
+       「safety system」，中转站也有直接写中文的。这类 400 不是「chat 接口不通」，
+       拿同一个提示词退去 images 兜底只会再被拒一次 —— 白等一轮，她还会看到两遍 safe。 */
+    function isModerationBlock(body) {
+        const raw = String(body == null ? "" : body);
+        if (/moderation_blocked|content[\s_-]?policy|content[\s_-]?filter|safety[\s_-]?system|safety[\s_-]?violation|flagged|not allowed by our safety/i.test(raw)) return true;
+        return /违规|违反|敏感|审核不通过/.test(raw);
+    }
+    /* 统一出口：超时/取消原样，HTTP 错误转「状态码 +（通道）+ 站点原话」，其余保留。
+       状态码和通道排在最前面：手机 toast 会截断，套话写在前面等于没写。 */
+    const GEN_VIA_RE = "代理 chat|chat|images";
     function formatGenError(e) {
         const raw = String((e && e.message) || e || "");
         if (/超时/.test(raw)) return raw;
         if (/已取消/.test(raw) || (e && e.name === "AbortError")) return "已取消生图";
-        const m = raw.match(/HTTP\s*(\d{3})/);
+        const m = raw.match(new RegExp("(?:(" + GEN_VIA_RE + ")\\s*接口\\s*)?HTTP\\s*(\\d{3})\\s*[:：]?\\s*([\\s\\S]*)"));
         if (m) {
-            const body = raw.split(/HTTP\s*\d{3}\s*[:：]?/).filter(Boolean).join(" / ");
+            /* 错误串可能是两段拼起来的（images 接口 … / chat 接口 …）：诊断只看第一段 =
+               最后真正走的那个通道，后面那段连同它的括号说明一起截掉 */
+            let body = String(m[3] || "");
+            const cut = body.search(new RegExp("\\s*/\\s*(?:" + GEN_VIA_RE + ")\\s*接口"));
+            if (cut >= 0) body = body.slice(0, cut);
             const d = (function () { try { return JSON.parse(body); } catch (e2) { return pickJsonBlock(body); } })();
             let detail = "";
             if (d) {
@@ -2834,7 +2857,7 @@
                 detail = [msg, (code && String(code) !== String(msg)) ? "(" + code + ")" : ""].filter(Boolean).join(" ");
             }
             if (!detail) detail = String(body || "").replace(/\s+/g, " ").trim();
-            return "生图失败 " + m[1] + "：" + (String(detail || "").slice(0, 140) || "站点未返回原因");
+            return "生图失败 " + m[2] + (m[1] ? "（" + m[1] + "）" : "") + "：" + (String(detail || "").slice(0, 140) || "站点未返回原因");
         }
         return raw;
     }
@@ -2887,8 +2910,8 @@
         /* 兜底只在「这个站的 chat 通道根本不通」时才走：接口不存在(404/405/501)、
            参数不被接受(400)、网络层错误。鉴权(401/403)、限流(429)、服务端错(5xx)一律不退——
            退了也是再吃一次同样的错，还白添一次请求；200 但解析不出图更是已经计费了，
-           再发一次等于同一张图扣两回。 */
-        let canFallback = false, charged = false;
+           再发一次等于同一张图扣两回。内容被审核拒的 400 同理（见 isModerationBlock）。 */
+        let canFallback = false, charged = false, moderated = false;
         if (imagesOnly) {
             lastErr = "按地址直连 images 接口";
             canFallback = true;
@@ -2946,7 +2969,8 @@
             } else {
                 const t = await resp.text();
                 lastErr = "chat 接口 " + siteErrorBrief(resp.status, t);
-                canFallback = (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 400);
+                moderated = (resp.status === 400 || resp.status === 403) && isModerationBlock(t);
+                canFallback = !moderated && (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 400);
             }
         } catch (e) {
             const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
@@ -2963,7 +2987,9 @@
             ctl.dispose();
             throw new Error(lastErr + (charged
                 ? "（站点已返回 200，可能已计费，没有再试 images 接口以免重复扣费）"
-                : "（没再试 images 接口：这类错误退了也是同样结果）"));
+                : moderated
+                    ? "（内容被站点审核拒了，没再试 images 接口：同一个提示词退过去也是一样被拒）"
+                    : "（没再试 images 接口：这类错误退了也是同样结果）"));
         }
         try {
             const headers = { "Content-Type": "application/json", "Accept": "*/*" };
@@ -2991,7 +3017,7 @@
                 throw new Error("images 接口响应未包含图片 / " + lastErr);
             }
             ctl.dispose();
-            throw new Error(siteErrorText(resp2.status, why2) + " / " + lastErr);
+            throw new Error("images 接口 " + siteErrorBrief(resp2.status, why2) + " / " + lastErr);
         } catch (e) {
             ctl.dispose();
             const ae = genAbortError(ctl); if (ae) throw ae;
@@ -3258,6 +3284,30 @@
         if (ex && ex.sdg_images) for (const k in ex.sdg_images) if (ex.sdg_images[k]) return true;
         if (ex && ex.sdg_image) return true;
         return false;
+    }
+    /* 标记被删 → 图跟着删：摘掉这楼当前 swipe 的图库记录，插件自己生成的文件一并清掉。
+       她自己插的图、别的插件的图没有 sdg_<时间戳>_ 文件名，碰不到。 */
+    function dropFloorImages(msg, why, fromSlot) {
+        const g = galRead(msg), sk = swipeKey(msg), sw = g[sk];
+        if (!sw) return false;
+        const from = Number(fromSlot) > 0 ? Number(fromSlot) : 0;
+        const paths = [];
+        let touched = false;
+        for (const k in sw) {
+            if (from && Number(k) < from) continue;
+            const r = sw[k];
+            if (r && Array.isArray(r.list)) r.list.forEach(function (u) { if (u) paths.push(String(u)); });
+            delete sw[k];
+            touched = true;
+        }
+        if (!touched) return false;
+        if (!Object.keys(sw).length) delete g[sk];
+        if (msg.extra && !from) { delete msg.extra.sdg_images; delete msg.extra.sdg_image; }
+        syncSwipeExtra(msg);
+        persistChat(why || "标记被删，清图");
+        paths.forEach(function (p) { if (sdgFileTime(p)) deleteServerImage(p); });
+        log((why || "清图") + "：摘掉 " + paths.length + " 张");
+        return true;
     }
 
     function escHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
@@ -3650,11 +3700,17 @@
             mesEl.setAttribute("data-sdg-swipe", sk);
         }
 
-        /* 正文里没标记：只有「无标记直接生图」留下的图才追加在楼尾 */
+        /* 正文里没标记 = 她把那一大串标记连提示词删掉了：图跟着一起清。
+           正文空的时候不动（流式刚开始 / 切 swipe 那一瞬间正文是空的，不是她删了标记）。 */
         if (!tags.length) {
             qa('#chat .mes[mesid="' + idx + '"] .sdg-slot').forEach(function (x) { x.remove(); });
-            return showOrphanImage(el, hasAnyImage(msg) ? getImage(msg, 0) : "");
+            if (hasAnyImage(msg) && String(msg.mes || "").trim()) dropFloorImages(msg, "标记被删，清图");
+            return showOrphanImage(el, "");
         }
+
+        /* 一楼多条标记、她删掉其中一条：尾巴上多出来的槽记录跟着清，
+           不然那张图留在图库里占着、翻图还翻得出来 */
+        if (hasAnyImage(msg)) dropFloorImages(msg, "标记少了，清掉多出来的图", tags.length);
 
         /* 第一遍：文本节点里的标记 → 槽（只碰文本，别的插件的 HTML 原样留着） */
         const have = el.querySelectorAll(".sdg-slot").length;
@@ -4964,7 +5020,8 @@
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
-            trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages
+            trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
+            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage
         };
     }
 

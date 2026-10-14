@@ -113,7 +113,14 @@ test('siteErrorBrief extracts status code and provider message', t => {
 test('formatGenError leads with status code and keeps timeout/cancel wording', t => {
     const { debug, w } = fixture(t);
     const e1 = new Error('images 接口 HTTP 400：{"error":{"message":"bad size"}} / chat 接口 HTTP 500：{"error":{"message":"down"}}');
-    assert.equal(debug.formatGenError(e1), '生图失败 400：bad size');
+    assert.equal(debug.formatGenError(e1), '生图失败 400（images）：bad size');
+    /* 单段也认，通道标识照常带上 */
+    assert.equal(
+        debug.formatGenError(new Error('chat 接口 HTTP 429：{"error":{"message":"no available image quota","code":"insufficient_quota"}}（没再试 images 接口：这类错误退了也是同样结果）')),
+        '生图失败 429（chat）：no available image quota (insufficient_quota)'
+    );
+    /* 没有通道前缀的（编辑接口按形状报错）也不丢状态码 */
+    assert.match(debug.formatGenError(new Error('编辑接口四种形状均失败 → [multipart-PNG] HTTP 400：bad image')), /^生图失败 400：/);
     assert.equal(debug.formatGenError(new Error('生图请求超时（300 秒），已停止（不自动重试，以免重复扣费）')), '生图请求超时（300 秒），已停止（不自动重试，以免重复扣费）');
     assert.equal(debug.formatGenError(new w.DOMException('aborted', 'AbortError')), '已取消生图');
     assert.equal(debug.formatGenError(new Error('请先填写生图模型')), '请先填写生图模型');

@@ -23,11 +23,14 @@ function fixture(t, { orphan = false, native = false, observer = true } = {}) {
         this.setAttribute('open', '');
     };
     else w.HTMLDialogElement.prototype.showModal = undefined;
-    const msg = { mes: orphan ? 'No marker' : 'Before image###a cat### after', is_user: false, extra: {} };
+    const msg = { mes: 'Before image###a cat### after', is_user: false, extra: {} };
     const context = { chat: [msg], extensionSettings: { 'st-drawgen': {} }, saveSettingsDebounced() {} };
     w.SillyTavern = { getContext: () => context };
     const text = w.document.querySelector('.mes_text');
-    text.textContent = msg.mes;
+    /* orphan = 槽建不出来的那条兜底路径：标记被别的插件包进 <pre>（TreeWalker 会跳过），
+       findAllTags 认得出但 DOM 里一个槽都建不了 → 图退到楼尾显示 */
+    if (orphan) text.innerHTML = '<pre>' + msg.mes + '</pre>';
+    else text.textContent = msg.mes;
     w.eval(source);
     tasks.shift()(); // Initialize the real plugin without running delayed generation or observer timers.
     const debug = w.__sdgDebug;
