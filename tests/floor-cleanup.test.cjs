@@ -7,13 +7,18 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 
 const TAG = 'image###a girl walking into the forest, cinematic###';
 const TAG2 = 'image###close-up of her hand###';
-const P1 = 'images/user/sdg_1760000000000_aaaaaa.png';
-const P2 = 'images/user/sdg_1760000001111_bbbbbb.png';
-const MINE = 'images/user/her_own_photo.png';          /* 她自己传的图：没有 sdg_<ts>_ 文件名 */
+/* 文件名里的时间戳要用「刚刚」——「存图天数」会按这个时间戳摘掉超期的图，
+   写死一个老时间戳的话测试会被那个功能清掉，跟这里要测的东西无关 */
+const TS = Date.now();
+const P1 = 'images/user/sdg_' + TS + '_aaaaaa.png';
+const P2 = 'images/user/sdg_' + (TS + 1) + '_bbbbbb.png';
+const P3 = 'images/user/sdg_' + (TS + 2) + '_cccccc.png';
 
-/* 一条 AI 楼 + 真的 mes_text 容器；fetch 记录删文件请求；saveChat 记录落盘 */
-function fixture(t, mes) {
-    const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div><div id="chat"><div class="mes" mesid="0"><div class="mes_text"></div><div class="mes_buttons"></div></div></div><textarea id="send_textarea"></textarea></body>', {
+/* 多楼夹具：真的 .mes 容器 + 真的事件源，fetch 记录所有请求（用来证明没去删文件） */
+function fixture(t, bodies, opts) {
+    opts = opts || {};
+    const mesHtml = bodies.map((b, i) => '<div class="mes" mesid="' + i + '"><div class="mes_text"></div><div class="mes_buttons"></div></div>').join('');
+    const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div><div id="chat">' + mesHtml + '</div><textarea id="send_textarea"></textarea></body>', {
         url: 'https://tavern.test/', runScripts: 'outside-only',
         virtualConsole: new VirtualConsole().on('jsdomError', (error) => { throw error; }),
     });
@@ -22,143 +27,164 @@ function fixture(t, mes) {
     const tasks = [];
     w.setTimeout = (fn) => (tasks.push(fn), tasks.length);
     w.clearTimeout = () => {};
-    const deleted = [];
-    let saves = 0;
-    w.fetch = async (url, opts) => {
-        if (String(url).indexOf('/api/images/delete') >= 0) {
-            try { deleted.push(JSON.parse(opts.body).path); } catch (e) { deleted.push('(unparsable)'); }
-            return { ok: true, status: 200, headers: { get: () => null }, text: async () => '{}', json: async () => ({}) };
-        }
-        return { ok: false, status: 404, headers: { get: () => null }, text: async () => '', json: async () => ({}) };
+    const posted = [];
+    w.fetch = async (url, o) => {
+        posted.push(String(url));
+        return { ok: true, status: 200, headers: { get: () => null }, text: async () => '{}', json: async () => ({}) };
     };
-    const msg = { mes: mes, is_user: false, extra: {}, swipe_id: 0, swipes: [mes], swipe_info: [{ extra: {} }] };
+    const chat = bodies.map((b) => ({ mes: b, is_user: false, extra: {}, swipe_id: 0, swipes: [b], swipe_info: [{ extra: {} }] }));
+    const handlers = {};
+    const names = ['MESSAGE_RECEIVED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'MESSAGE_EDITED', 'CHAT_CHANGED', 'APP_READY'];
+    const event_types = {};
+    names.forEach((n) => { event_types[n] = n; });
+    let saves = 0;
     const context = {
-        chat: [msg], extensionSettings: { 'st-drawgen': { sdgBuiltinSeeded17: true } },
+        chat, extensionSettings: { 'st-drawgen': { sdgBuiltinSeeded17: true } },
         saveSettingsDebounced() {}, saveChat() { saves++; return Promise.resolve(); },
         getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+        eventSource: { on(ev, fn) { (handlers[ev] = handlers[ev] || []).push(fn); } },
+        event_types,
     };
     w.SillyTavern = { getContext: () => context };
-    const textEl = w.document.querySelector('.mes_text');
-    textEl.textContent = mes;
+    const cells = Array.from(w.document.querySelectorAll('.mes_text'));
+    bodies.forEach((b, i) => { cells[i].textContent = b; });
     w.eval(source);
-    tasks.shift()();
-    const flush = async () => { while (tasks.length) { const fn = tasks.shift(); try { fn(); } catch (e) {} } await Promise.resolve(); await Promise.resolve(); };
+    tasks.shift()();                                   // init
+    const flush = async () => {
+        for (let guard = 0; guard < 50 && tasks.length; guard++) { const fn = tasks.shift(); try { fn(); } catch (e) {} }
+        await Promise.resolve(); await Promise.resolve();
+    };
+    const debug = w.__sdgDebug;
     return {
-        w, msg, textEl, debug: w.__sdgDebug, deleted, flush,
+        w, chat, debug, posted, flush,
         saves: () => saves,
-        /* 她在酒馆里编辑这楼：正文改了，酒馆重渲染 mes_text 并发 MESSAGE_UPDATED */
-        edit: (next) => { msg.mes = next; msg.swipes[0] = next; textEl.textContent = next; },
-        imgs: () => textEl.querySelectorAll('img.sdg-img').length,
-        gal: () => (msg.extra.sdg_gal && msg.extra.sdg_gal['0']) || null,
+        imgs: (i) => cells[i].querySelectorAll('img.sdg-img').length,
+        gal: (i) => (chat[i].extra.sdg_gal && chat[i].extra.sdg_gal['0']) || null,
+        draw: (i) => debug.renderFloorImage(i),
+        drawAll: () => debug.renderAllImages(),
+        /* 她在酒馆里编辑这一楼：正文改掉，酒馆重渲染正文并发事件 */
+        edit: (i, next, evName) => {
+            chat[i].mes = next; chat[i].swipes[0] = next; cells[i].textContent = next;
+            (handlers[evName || 'MESSAGE_EDITED'] || []).forEach((fn) => fn(i));
+        },
+        emit: (ev, arg) => (handlers[ev] || []).forEach((fn) => fn(arg)),
     };
 }
 
-test('删掉整条标记，图跟着清：楼里没了、图库记录没了、服务器文件也删了', async (t) => {
-    const f = fixture(t, '她推开木门。\n\n' + TAG + '\n\n风从林间穿过。');
-    f.debug.setImage(f.msg, 0, P1);
-    f.debug.renderFloorImage(0);
-    assert.equal(f.imgs(), 1, '生成完：图在槽里');
+test('删掉这一楼的标记：只有这一楼的图跟着清，别的楼一张都不动', async (t) => {
+    const f = fixture(t, ['甲楼\n\n' + TAG, '乙楼\n\n' + TAG, '丙楼（本来就没有标记）']);
+    f.debug.setImage(f.chat[0], 0, P1);
+    f.debug.setImage(f.chat[1], 0, P2);
+    f.debug.setImage(f.chat[2], 0, P3);
+    f.drawAll();
+    assert.equal(f.imgs(0), 1);
+    assert.equal(f.imgs(1), 1);
+    assert.equal(f.imgs(2), 1, '没标记的楼，图贴在楼尾');
 
-    /* 复现用的反面：修之前这里图会被贴到楼尾（orphan），图库记录原样留着 */
-    f.edit('她推开木门。\n\n风从林间穿过。');
-    f.debug.renderFloorImage(0);
-    assert.equal(f.imgs(), 0, '标记删了，楼里不许再有图');
-    assert.equal(f.gal(), null, '图库记录跟着清');
+    f.edit(0, '甲楼');                                  /* 只删 0 楼的标记 */
     await f.flush();
-    assert.deepEqual(f.deleted, [P1], '服务器文件一起删');
+    assert.equal(f.gal(0), null, '0 楼的图清了');
+    assert.equal(f.imgs(0), 0);
+    assert.ok(f.gal(1), '1 楼不许受影响');
+    assert.equal(f.imgs(1), 1);
+    assert.ok(f.gal(2), '2 楼不许受影响');
+    assert.equal(f.imgs(2), 1);
+});
+
+test('本来就没标记的楼：全楼重绘、切聊天、反复刷都不许动它的图', async (t) => {
+    const f = fixture(t, ['这楼没有标记', '这楼也没有', '第三楼也没有']);
+    f.chat.forEach((m, i) => f.debug.setImage(m, 0, [P1, P2, P3][i]));
+    for (let round = 0; round < 3; round++) {
+        f.drawAll();
+        f.emit('CHAT_CHANGED');
+        f.emit('APP_READY');
+        await f.flush();
+    }
+    f.chat.forEach((m, i) => {
+        assert.ok(f.gal(i), '第 ' + i + ' 楼的图库记录必须还在');
+        assert.equal(f.imgs(i), 1, '第 ' + i + ' 楼的图照常贴在楼尾');
+    });
+    assert.equal(f.saves(), 0, '什么都没改，不许落盘');
+});
+
+test('没重绘过的楼（隐藏楼不进 DOM）：编辑它也不许清图', async (t) => {
+    const f = fixture(t, ['藏起来的楼\n\n' + TAG]);
+    f.debug.setImage(f.chat[0], 0, P1);
+    /* 隐藏楼不在 DOM 里 → 从没重绘过 → 插件没见过它有标记 */
+    f.w.document.querySelector('.mes').remove();
+    f.edit(0, '藏起来的楼');
+    await f.flush();
+    assert.ok(f.gal(0), '没亲眼见过标记，就不许判成「她删了」');
+});
+
+test('一楼多条标记删掉一条：图一张都不动（图可能写在最后那个槽上）', async (t) => {
+    const f = fixture(t, ['甲\n\n' + TAG + '\n\n乙\n\n' + TAG2 + '\n\n丙']);
+    /* 自动生图的槽位是 tags.length-1，所以唯一那张图在 1 号槽，不是 0 号 */
+    f.debug.setImage(f.chat[0], 1, P1);
+    f.draw(0);
+    f.edit(0, '甲\n\n' + TAG + '\n\n乙\n\n丙');
+    await f.flush();
+    assert.ok(f.gal(0), '还剩标记就一张都不许清');
+    assert.equal(f.debug.getImage(f.chat[0], 1), P1);
+});
+
+test('清图只摘聊天里的引用，不去删服务器上的文件', async (t) => {
+    const f = fixture(t, ['这楼\n\n' + TAG]);
+    f.debug.setImage(f.chat[0], 0, P1);
+    f.debug.setImage(f.chat[0], 0, P2);                 /* 重画过，槽里两张历史 */
+    f.draw(0);
+    f.edit(0, '这楼');
+    await f.flush();
+    assert.equal(f.gal(0), null);
+    assert.deepEqual(f.posted.filter((u) => u.indexOf('/api/images/delete') >= 0), [], '一个删除请求都不许发');
+});
+
+test('清图同步 swipe_info 并落盘，切 swipe 回来图不会复活', async (t) => {
+    const f = fixture(t, ['这楼\n\n' + TAG]);
+    f.debug.setImage(f.chat[0], 0, P1);
+    f.debug.syncSwipeExtra(f.chat[0]);
+    f.draw(0);
+    f.edit(0, '这楼');
+    await f.flush();
+    const snap = f.chat[0].swipe_info[0].extra.sdg_gal;
+    assert.ok(!snap || !snap['0'], 'swipe_info 里那份也清了');
+    f.chat[0].extra = JSON.parse(JSON.stringify(f.chat[0].swipe_info[0].extra));
+    f.debug.restoreSwipeExtra(f.chat[0]);
+    assert.equal(f.debug.hasAnyImage(f.chat[0]), false);
     assert.ok(f.saves() >= 1, '清完要落盘');
-
-    /* 观察器下一次重绘不许把图贴回来 */
-    f.debug.renderFloorImage(0);
-    assert.equal(f.imgs(), 0);
 });
 
-test('清图同步到 swipe_info，切走再切回来图不会复活', async (t) => {
-    const f = fixture(t, TAG);
-    f.debug.setImage(f.msg, 0, P1);
-    f.debug.syncSwipeExtra(f.msg);
-    assert.ok(f.msg.swipe_info[0].extra.sdg_gal, '生成后 swipe_info 里有一份');
-    f.edit('标记被我删了');
-    f.debug.renderFloorImage(0);
-    const snap = f.msg.swipe_info[0].extra.sdg_gal;
-    assert.ok(!snap || !snap['0'], 'swipe_info 里的那份也清了');
-    /* 酒馆切 swipe 会用 swipe_info 覆盖 extra，再走 restoreSwipeExtra 补回 —— 不该把图补回来 */
-    f.msg.extra = JSON.parse(JSON.stringify(f.msg.swipe_info[0].extra));
-    f.debug.restoreSwipeExtra(f.msg);
-    assert.equal(f.debug.hasAnyImage(f.msg), false);
-});
-
-test('正文里没标记就一律清图（没有「没标记也留图」这种情况）', async (t) => {
-    const f = fixture(t, '这楼从头到尾没有标记。');
-    f.debug.setImage(f.msg, 0, P1);
-    f.debug.renderFloorImage(0);
+test('切 swipe 不算删标记', async (t) => {
+    const f = fixture(t, ['这楼\n\n' + TAG]);
+    f.debug.setImage(f.chat[0], 0, P1);
+    f.draw(0);
+    f.chat[0].mes = '另一条回复，没有标记';
+    f.emit('MESSAGE_SWIPED', 0);
     await f.flush();
-    assert.equal(f.imgs(), 0);
-    assert.equal(f.gal(), null);
-    assert.deepEqual(f.deleted, [P1]);
+    assert.ok(f.gal(0), '切 swipe 不许清图');
 });
 
-test('正文暂时为空（流式刚开始 / 切 swipe 那一瞬间）不许清图', async (t) => {
-    const f = fixture(t, TAG);
-    f.debug.setImage(f.msg, 0, P1);
-    f.debug.renderFloorImage(0);
-    f.edit('');
-    f.debug.renderFloorImage(0);
+test('正文暂时为空（流式刚开始）不许清图', async (t) => {
+    const f = fixture(t, ['这楼\n\n' + TAG]);
+    f.debug.setImage(f.chat[0], 0, P1);
+    f.draw(0);
+    f.edit(0, '', 'MESSAGE_UPDATED');
     await f.flush();
-    assert.ok(f.gal(), '图库记录必须还在');
-    assert.deepEqual(f.deleted, []);
-    /* 正文回来了，图照常显示 */
-    f.edit(TAG);
-    f.debug.renderFloorImage(0);
-    assert.equal(f.imgs(), 1);
+    assert.ok(f.gal(0), '空正文不是她删了标记');
+    f.edit(0, '这楼\n\n' + TAG, 'MESSAGE_UPDATED');
+    await f.flush();
+    assert.equal(f.imgs(0), 1, '正文回来了图照常显示');
 });
 
-test('一楼两条标记删掉一条：只清尾巴上多出来的那张', async (t) => {
-    const f = fixture(t, '甲\n\n' + TAG + '\n\n乙\n\n' + TAG2 + '\n\n丙');
-    f.debug.setImage(f.msg, 0, P1);
-    f.debug.setImage(f.msg, 1, P2);
-    f.debug.renderFloorImage(0);
-    assert.equal(f.imgs(), 2);
-
-    f.edit('甲\n\n' + TAG + '\n\n乙\n\n丙');
-    f.debug.renderFloorImage(0);
+test('删标记之后再也不会二次触发（图库已经空了）', async (t) => {
+    const f = fixture(t, ['这楼\n\n' + TAG]);
+    f.debug.setImage(f.chat[0], 0, P1);
+    f.draw(0);
+    f.edit(0, '这楼');
     await f.flush();
-    assert.equal(f.imgs(), 1, '剩一条标记就剩一张图');
-    assert.equal(f.debug.getImage(f.msg, 0), P1, '留下的那张不动');
-    assert.equal(f.debug.getImage(f.msg, 1), '', '多出来的槽记录清了');
-    assert.deepEqual(f.deleted, [P2]);
-});
-
-test('只删插件自己生成的文件，她自己传的图不碰', async (t) => {
-    const f = fixture(t, TAG);
-    f.debug.setImage(f.msg, 0, MINE);
-    f.debug.renderFloorImage(0);
-    f.edit('标记删了');
-    f.debug.renderFloorImage(0);
+    const saves1 = f.saves();
+    f.edit(0, '这楼改了点别的字');
+    f.edit(0, '再改一次');
     await f.flush();
-    assert.equal(f.gal(), null, '引用照样摘掉（楼里不显示了）');
-    assert.deepEqual(f.deleted, [], '但不许去删她的文件');
-});
-
-test('标记还在的时候一张图都不许动（最常见的那条路）', async (t) => {
-    const f = fixture(t, '前文\n\n' + TAG + '\n\n后文');
-    f.debug.setImage(f.msg, 0, P1);
-    for (let i = 0; i < 5; i++) f.debug.renderFloorImage(0);
-    await f.flush();
-    assert.equal(f.imgs(), 1);
-    assert.equal(f.debug.getImage(f.msg, 0), P1);
-    assert.deepEqual(f.deleted, []);
-    assert.equal(f.saves(), 0, '什么都没变就不该落盘');
-});
-
-test('翻图历史：清的时候整槽的历史都摘掉，文件逐张删', async (t) => {
-    const f = fixture(t, TAG);
-    f.debug.setImage(f.msg, 0, P1);
-    f.debug.setImage(f.msg, 0, P2);          /* 重画一次，槽里两张历史 */
-    assert.equal(f.debug.getImageCount(f.msg, 0), 2);
-    f.edit('没有标记了');
-    f.debug.renderFloorImage(0);
-    await f.flush();
-    assert.equal(f.gal(), null);
-    assert.deepEqual(f.deleted.slice().sort(), [P1, P2].sort());
+    assert.equal(f.saves(), saves1, '没有图可清就不该再落盘');
 });

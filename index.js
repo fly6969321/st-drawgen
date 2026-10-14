@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.4
+ *  生图工坊 · DrawGen v1.8.5
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -55,15 +55,24 @@
  *       这类错误现在立刻停（Grok 不做内容审核，走不到这条路，所以那边一直正常）。
  *    ② 失败提示原先印成「生图失败 400：生图失败 / …」（前缀被当成站点原话、通道标识丢了），
  *       现在是「生图失败 400（chat）：站点原话」，状态码仍排在最前面。
- *    ③ 删掉正文里那一整条 image###…### 标记，图跟着清（图库记录 + 服务器文件）。
- *       图本来存在 extra.sdg_gal 里，跟正文是两回事，所以原先删了标记图会被贴到楼尾，
- *       手动删 DOM 里的图也会被观察器贴回来。一楼多条标记时，删一条就清掉尾巴上多出来的那张。
+ *    ③ 删掉正文里那一整条 image###…### 标记，这一楼的图跟着清（只摘聊天里的引用）。
+ *  · v1.8.5 修 1.8.4 清图清错（它清掉了她二十几楼的图）：
+ *    病根是拿「正文里没有标记」当成「标记被她删了」。她很多楼本来就不带标记
+ *    （图在 extra.sdg_gal 里、靠 showOrphanImage 贴在楼尾显示），而重绘会在启动、
+ *    切聊天、每次 DOM 变动后把所有楼跑一遍 —— 一遍扫过去全被当成「标记被删」清掉；
+ *    隐藏楼不进 DOM、不重绘，所以躲过了。
+ *    改成三条：①清图只认 tagsSeen 的前后对比（上一次重绘时这楼有标记、这次编辑后没有了），
+ *    没亲眼看到这个转变就什么都不做，刷新后表是空的也什么都不做；
+ *    ②只清事件带来的那一个楼号，重绘路径一行数据都不碰；
+ *    ③只摘聊天里的引用、不删服务器文件（文件交给「存图天数」统一清，判错了还能用聊天备份找回）。
+ *    另撤掉 1.8.4 那条「标记少了就清掉编号 ≥ 标记数的槽」——自动生图的槽位是 tags.length-1，
+ *    一楼多条标记只生一张图时，图正好落在最后那个槽上，删掉一条标记就把它砍了。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.4";
+    const VERSION = "1.8.5";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -3285,29 +3294,39 @@
         if (ex && ex.sdg_image) return true;
         return false;
     }
-    /* 标记被删 → 图跟着删：摘掉这楼当前 swipe 的图库记录，插件自己生成的文件一并清掉。
-       她自己插的图、别的插件的图没有 sdg_<时间戳>_ 文件名，碰不到。 */
-    function dropFloorImages(msg, why, fromSlot) {
+    /* 标记被删 → 图跟着删：摘掉这楼当前 swipe 的整份图库记录。
+       只摘聊天里的引用、不碰服务器上的文件 —— 文件由「存图天数」到期统一清，
+       这样万一这里判错了，拿聊天备份就能把图全找回来。 */
+    function dropFloorImages(msg, why) {
         const g = galRead(msg), sk = swipeKey(msg), sw = g[sk];
         if (!sw) return false;
-        const from = Number(fromSlot) > 0 ? Number(fromSlot) : 0;
-        const paths = [];
-        let touched = false;
-        for (const k in sw) {
-            if (from && Number(k) < from) continue;
-            const r = sw[k];
-            if (r && Array.isArray(r.list)) r.list.forEach(function (u) { if (u) paths.push(String(u)); });
-            delete sw[k];
-            touched = true;
-        }
-        if (!touched) return false;
-        if (!Object.keys(sw).length) delete g[sk];
-        if (msg.extra && !from) { delete msg.extra.sdg_images; delete msg.extra.sdg_image; }
+        let n = 0;
+        for (const k in sw) { const r = sw[k]; if (r && Array.isArray(r.list)) n += r.list.length; }
+        delete g[sk];
+        if (msg.extra) { delete msg.extra.sdg_images; delete msg.extra.sdg_image; }
         syncSwipeExtra(msg);
         persistChat(why || "标记被删，清图");
-        paths.forEach(function (p) { if (sdgFileTime(p)) deleteServerImage(p); });
-        log((why || "清图") + "：摘掉 " + paths.length + " 张");
+        log((why || "清图") + "：摘掉 " + n + " 张引用（文件没动）");
         return true;
+    }
+
+    /* 上一次重绘时这楼正文里有几个标记（纯内存，不写进聊天记录）。
+       「她把标记删了」只能靠前后对比判断：**亲眼看到从有变没**才算删。
+       本来就没标记的楼（图贴在楼尾那种）值一直是 0，永远不会被判成删；
+       刷新后这张表是空的，没观察到转变就什么都不做。 */
+    const tagsSeen = {};
+    function tagsSeenKey(idx, msg) { return idx + ":" + swipeKey(msg); }
+    /* 她编辑完这一楼：标记从有变没 → 这楼的图跟着清（只清这一楼） */
+    function dropIfMarkersGone(idx, msg) {
+        if (!msg || msg.is_user) return false;
+        const body = String(msg.mes || "").trim();
+        if (!body) return false;                       /* 流式刚开始 / 切 swipe 那一瞬间正文是空的 */
+        const k = tagsSeenKey(idx, msg);
+        if (!(Number(tagsSeen[k]) > 0)) return false;  /* 上次重绘时就没有标记 → 不是她删的 */
+        if (findAllTags(msg.mes).length) return false;
+        if (!hasAnyImage(msg)) { tagsSeen[k] = 0; return false; }
+        tagsSeen[k] = 0;
+        return dropFloorImages(msg, "标记被删，清图");
     }
 
     function escHtml(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
@@ -3690,6 +3709,7 @@
         const el = mesEl && mesEl.querySelector(".mes_text");
         if (!el) return false;
         const tags = findAllTags(msg.mes);
+        tagsSeen[tagsSeenKey(idx, msg)] = tags.length;
         const hide = cfg().hideTagText !== false;
 
         /* swipe 变了：这楼的槽全部作废重来（否则旧回复的图挂在新回复上） */
@@ -3700,17 +3720,13 @@
             mesEl.setAttribute("data-sdg-swipe", sk);
         }
 
-        /* 正文里没标记 = 她把那一大串标记连提示词删掉了：图跟着一起清。
-           正文空的时候不动（流式刚开始 / 切 swipe 那一瞬间正文是空的，不是她删了标记）。 */
+        /* 正文里没标记：图贴在楼尾（她很多楼本来就是这样的——正文里没有标记、图在图库里）。
+           这里绝不能动数据：重绘会在启动、切聊天、每次 DOM 变动后把所有楼跑一遍，
+           在这儿删东西等于拿显示状态去改她的聊天记录。清图只认 tagsSeen 的前后对比。 */
         if (!tags.length) {
             qa('#chat .mes[mesid="' + idx + '"] .sdg-slot').forEach(function (x) { x.remove(); });
-            if (hasAnyImage(msg) && String(msg.mes || "").trim()) dropFloorImages(msg, "标记被删，清图");
-            return showOrphanImage(el, "");
+            return showOrphanImage(el, hasAnyImage(msg) ? getImage(msg, 0) : "");
         }
-
-        /* 一楼多条标记、她删掉其中一条：尾巴上多出来的槽记录跟着清，
-           不然那张图留在图库里占着、翻图还翻得出来 */
-        if (hasAnyImage(msg)) dropFloorImages(msg, "标记少了，清掉多出来的图", tags.length);
 
         /* 第一遍：文本节点里的标记 → 槽（只碰文本，别的插件的 HTML 原样留着） */
         const have = el.querySelectorAll(".sdg-slot").length;
@@ -4945,6 +4961,15 @@
                             const m0 = Number.isFinite(n0) ? (ctx().chat || [])[n0] : null;
                             if (m0 && restoreSwipeExtra(m0)) persistChat("swipe 恢复");
                         } catch (e) {}
+                        /* 她刚把这楼的标记删掉（上一次重绘时还在）→ 图跟着清。
+                           只认编辑/更新事件里的这一楼，切 swipe 不算。 */
+                        if (evName !== "MESSAGE_SWIPED") {
+                            try {
+                                const n1 = Number(i);
+                                const m1 = Number.isFinite(n1) ? (ctx().chat || [])[n1] : null;
+                                if (m1) dropIfMarkersGone(n1, m1);
+                            } catch (e) {}
+                        }
                         setTimeout(function () {
                             try { const n = Number(i); if (Number.isFinite(n)) renderFloorImage(n); else renderAllImages(); installMesButtons(); } catch (e) {}
                         }, 120);
@@ -5021,7 +5046,7 @@
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
-            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage
+            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone
         };
     }
 
