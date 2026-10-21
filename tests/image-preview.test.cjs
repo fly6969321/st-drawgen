@@ -93,6 +93,22 @@ test('history paging and collapse still work; re-rendered images remain clickabl
     assert.ok(f.preview());
 });
 
+test('floor renderer leaves a message alone while SillyTavern is editing it', t => {
+    const f = fixture(t);
+    const before = f.text.innerHTML;
+    const editor = f.w.document.createElement('textarea');
+    editor.className = 'edit_textarea';
+    f.text.appendChild(editor);
+    const editingDom = f.text.innerHTML;
+
+    assert.equal(f.debug.renderFloorImage(0), false, '编辑期间跳过图片槽重绘');
+    assert.equal(f.text.innerHTML, editingDom, '编辑器里的楼层 DOM 保持不变');
+    assert.notEqual(editingDom, before, '模拟楼层已经进入编辑状态');
+
+    editor.remove();
+    assert.equal(f.debug.renderFloorImage(0), true, '编辑结束后恢复正常重绘');
+});
+
 test('clicking the preview image does not close it; background does', t => {
     const f = fixture(t);
     f.click(f.image());

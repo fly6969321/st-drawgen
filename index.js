@@ -2277,6 +2277,8 @@
     const MES_BTN_REGEN = "sdg-mes-regen";
     function installMesButtons() {
         const chatEl = q("#chat"); if (!chatEl) return 0;
+        /* 编辑楼层时酒馆会暂时替换正文节点；此时不往编辑器所在楼层插按钮。 */
+        if (chatEl.querySelector(".edit_textarea")) return 0;
         let chat = [];
         try { chat = (ctx() && ctx().chat) || []; } catch (e) {}
         Array.prototype.slice.call(chatEl.querySelectorAll(".mes")).forEach(function (m) {
@@ -2316,6 +2318,10 @@
             window.__sdgMesBtnObs = new MutationObserver(function () {
                 if (t) clearTimeout(t);
                 t = setTimeout(function () {
+                    t = null;
+                    /* 编辑时 SillyTavern 会反复替换楼层 DOM。不要在编辑器打开期间重绘图片，
+                       否则图片槽的插入/移除会改变楼层高度，让滚动位置看起来被吸回图片处。 */
+                    if (chatEl.querySelector(".edit_textarea")) return;
                     try { installMesButtons(); renderAllImages(); } catch (e) {}
                 }, 250);
             });
@@ -3706,6 +3712,8 @@
         try { msg = (ctx().chat || [])[idx]; } catch (e) { return false; }
         if (!msg) return false;
         const mesEl = q('#chat .mes[mesid="' + idx + '"]');
+        /* 编辑器代替 .mes_text 的这段时间保持 DOM 原样；保存/取消后由酒馆事件重绘。 */
+        if (mesEl && mesEl.querySelector(".edit_textarea")) return false;
         const el = mesEl && mesEl.querySelector(".mes_text");
         if (!el) return false;
         const tags = findAllTags(msg.mes);
