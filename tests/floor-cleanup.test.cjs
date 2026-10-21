@@ -164,6 +164,22 @@ test('切 swipe 不算删标记', async (t) => {
     assert.ok(f.gal(0), '切 swipe 不许清图');
 });
 
+test('编辑框打开时不按临时正文清图，保存后再按最终正文清理', async (t) => {
+    const f = fixture(t, ['这楼\n\n' + TAG]);
+    f.debug.setImage(f.chat[0], 0, P1);
+    f.draw(0);
+    const editor = f.w.document.createElement('textarea');
+    editor.className = 'edit_textarea';
+    f.w.document.querySelector('.mes').appendChild(editor);
+    f.edit(0, '这楼（编辑中的临时正文）', 'MESSAGE_UPDATED');
+    await f.flush();
+    assert.ok(f.gal(0), '编辑过程中图片引用保留');
+    editor.remove();
+    f.emit('MESSAGE_EDITED', 0);
+    await f.flush();
+    assert.equal(f.gal(0), null, '保存后确认最终正文已删标记，再清图');
+});
+
 test('正文暂时为空（流式刚开始）不许清图', async (t) => {
     const f = fixture(t, ['这楼\n\n' + TAG]);
     f.debug.setImage(f.chat[0], 0, P1);

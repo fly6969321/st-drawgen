@@ -269,6 +269,38 @@ test('extraction has a watchdog so the lock cannot stay stuck', t => {
     assert.ok(/if \(guard\) \{ clearTimeout\(guard\)/.test(fn), '正常结束要撤掉看门狗');
 });
 
+test('a response arriving after the watchdog cannot overwrite a newer extraction', async t => {
+    const { w, debug } = fixture(t, { extEndpoint: 'https://extract.test/v1', extModel: 'model' }, [{ mes: '剧情', is_user: false, extra: {} }]);
+    const timers = new Map();
+    let timerId = 0;
+    w.setTimeout = fn => { const id = ++timerId; timers.set(id, fn); return id; };
+    w.clearTimeout = id => timers.delete(id);
+    let resolveOld, calls = 0;
+    w.fetch = () => {
+        calls++;
+        if (calls === 1) return new Promise(resolve => { resolveOld = resolve; });
+        return Promise.resolve({
+            ok: true, status: 200,
+            text: async () => JSON.stringify({ choices: [{ message: { content: 'new prompt' } }] }),
+        });
+    };
+
+    const oldRun = debug.runExtract('old request', '', { auto: false, targetIdx: 0 });
+    assert.equal(timers.size, 1, '旧请求有看门狗');
+    const [watchdogId, watchdog] = Array.from(timers.entries())[0];
+    timers.delete(watchdogId);
+    watchdog();
+
+    await debug.runExtract('new request', '', { auto: false, targetIdx: 0 });
+    assert.equal(w.document.querySelector('#sdg-preview').value, 'new prompt');
+    resolveOld({
+        ok: true, status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: 'stale prompt' } }] }),
+    });
+    await oldRun;
+    assert.equal(w.document.querySelector('#sdg-preview').value, 'new prompt', '迟到的旧结果无权覆盖新结果');
+});
+
 test('fetchWithTimeout keeps guarding while the body is read', t => {
     const fn = source.slice(source.indexOf('function fetchWithTimeout'),
                             source.indexOf('function normalizeApiBase'));
@@ -286,6 +318,40 @@ test('a thinking-only response produces a readable error, not raw JSON', t => {
     assert.ok(/hadReasoning/.test(fn), '要识别「只有思考没有正文」这种情况');
     assert.ok(/只输出了思考内容/.test(fn), '错误消息要说人话');
     assert.ok(/finish_reason=length/.test(fn), '被截断时也要说清');
+});
+
+test('reasoning_content alone is rejected instead of being used as the generated prompt', async t => {
+    const { w, debug } = fixture(t, { extEndpoint: 'https://extract.test/v1', extModel: 'thinking-model' });
+    const body = JSON.stringify({ choices: [{ finish_reason: 'stop', message: { reasoning_content: 'I should draw a girl in the forest.' } }] });
+    w.fetch = async () => ({ ok: true, status: 200, text: async () => body });
+    await assert.rejects(debug.callSubAI('剧情正文', '', null), /模型只输出了思考内容、没给正文/);
+    assert.equal(debug.parseChatResponse(JSON.parse(body)), '', '解析器只取正文，不能把思考当成提示词');
+});
+
+test('coalesced chat saves resolve every caller after one save', async t => {
+    const { w, debug, ctx } = fixture(t);
+    const timers = new Map();
+    let id = 0, saves = 0;
+    w.setTimeout = fn => { const next = ++id; timers.set(next, fn); return next; };
+    w.clearTimeout = timerId => timers.delete(timerId);
+    ctx.saveChat = () => { saves++; };
+    const first = debug.persistChat('first change');
+    const second = debug.persistChat('second change');
+    assert.equal(timers.size, 1, '同帧落盘请求被合并');
+    Array.from(timers.values()).forEach(fn => fn());
+    assert.deepEqual(await Promise.all([first, second]), [true, true], '两个等待者都完成');
+    assert.equal(saves, 1, '只调用一次 saveChat');
+});
+
+test('stopping while the generated image is uploading cancels persistence instead of claiming success', async t => {
+    const { w, debug, ctx } = fixture(t);
+    ctx.getRequestHeaders = () => ({});
+    w.fetch = async (_url, options) => {
+        assert.ok(options.signal, '上传请求要接入可取消信号');
+        debug.onStop();
+        throw new w.DOMException('aborted', 'AbortError');
+    };
+    await assert.rejects(debug.persistGenImage('data:image/png;base64,AAAA'), /已取消生图/);
 });
 
 test('trimSourceText keeps long source text intact up to 9000 chars', t => {
@@ -484,6 +550,23 @@ test('dropExpiredRefs mirrors the change into swipe_info', t => {
     assert.equal(mirrored['0']['0'].list.length, 1, '镜像也是清理后的状态');
 });
 
+test('expired references are removed from every swipe snapshot and cannot be restored later', t => {
+    const old = imgPath(30), fresh = imgPath(1);
+    const msg = galMsg([old, fresh]);
+    msg.swipe_info.push({ extra: { sdg_gal: {
+        '0': { '0': { list: [old], cur: 0 } },
+        '1': { '0': { list: [old], cur: 0 } },
+    } } });
+    const { debug } = fixture(t, {}, [msg]);
+    debug.dropExpiredRefs(Date.now() - 7 * 86400000);
+    assert.equal(msg.swipe_info[0].extra.sdg_gal['0']['0'].list[0], fresh, '当前快照保留新图');
+    assert.equal(msg.swipe_info[1].extra.sdg_gal['0'], undefined, '另一条 swipe 的过期图也摘掉');
+    msg.extra = JSON.parse(JSON.stringify(msg.swipe_info[1].extra));
+    msg.swipe_id = 1;
+    debug.restoreSwipeExtra(msg);
+    assert.ok(!msg.extra.sdg_gal || !msg.extra.sdg_gal['0'], '恢复快照不会让过期图复活');
+});
+
 test('cleanupOldImages does nothing when 存图天数 is 0', async t => {
     const msg = galMsg([imgPath(300)]);
     const { w, debug, ctx } = fixture(t, { imageKeepDays: 0 }, [msg]);
@@ -532,6 +615,17 @@ test('cleanupOldImages throttles itself unless forced', async t => {
 
     assert.equal(await debug.cleanupOldImages(false), 0, '刚清理过就跳过');
     assert.equal(calls, 0, '不发请求');
+});
+
+test('cleanup throttle skips the server scan but still clears expired refs in the newly opened chat', async t => {
+    const msg = galMsg([imgPath(30)]);
+    const { w, debug, ctx } = fixture(t, { imageKeepDays: 7, imageCleanAt: Date.now() }, [msg]);
+    let calls = 0;
+    ctx.getRequestHeaders = () => ({});
+    w.fetch = () => { calls++; return Promise.resolve({ ok: true, status: 200, json: async () => [] }); };
+    assert.equal(await debug.cleanupOldImages(false), 0, '服务器扫描仍受节流');
+    assert.equal(calls, 0, '没有扫描服务器目录');
+    assert.equal(msg.extra.sdg_gal['0'], undefined, '当前聊天中的过期引用仍然被摘掉');
 });
 
 test('a 404 from the delete endpoint still counts as cleaned', async t => {

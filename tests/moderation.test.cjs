@@ -121,6 +121,53 @@ test('成功路径不受影响（chat 直接回 markdown 图链）', async (t) =
     assert.equal(out.image, DATA_IMG);
 });
 
+test('chat 返回 200 但 JSON 损坏时不误判网络失败而重复请求', async (t) => {
+    const { w, debug } = fixture(t, GPT);
+    const calls = stub(w, [[200, '{broken json']]);
+    const { err } = await gen(debug);
+    assert.equal(calls.length, 1, '200 已经可能计费，不能再退到 images 接口');
+    assert.match(err, /可能已计费/);
+});
+
+test('地址直指 images 且开了后端代理时仍按直连路径请求 images', async (t) => {
+    const settings = Object.assign({}, GPT, {
+        genEndpoint: 'https://gpt.test/v1/images/generations',
+        genProxy: true,
+    });
+    const { w, debug, ctx } = fixture(t, settings);
+    ctx.getRequestHeaders = () => ({});
+    const calls = stub(w, [[200, JSON.stringify({ data: [{ b64_json: 'AAAA' }] })]]);
+    const { out, err } = await gen(debug);
+    assert.equal(err, '');
+    assert.equal(out.via, 'generations');
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/images\/generations$/);
+});
+
+test('停止图片 URL 下载会向上传递取消，不把未下载 URL 当作成功图片', async (t) => {
+    const { w, debug } = fixture(t, GPT);
+    const calls = [];
+    w.fetch = async (url, options) => {
+        calls.push(String(url));
+        if (String(url).endsWith('/chat/completions')) {
+            const body = JSON.stringify({ choices: [{ message: { content: '![](https://cdn.test/image.png)' } }] });
+            return {
+                ok: true, status: 200,
+                headers: { get: () => 'application/json' },
+                text: async () => body,
+            };
+        }
+        debug.onStop();
+        throw new w.DOMException('aborted', 'AbortError');
+    };
+    globalThis.fetch = w.fetch;
+    const { out, err } = await gen(debug);
+    assert.equal(out, null);
+    assert.match(err, /已取消生图/);
+    assert.equal(calls.length, 2, '不能继续请求 images 兜底');
+    assert.ok(!calls.some(url => url.endsWith('/images/generations')));
+});
+
 test('地址直指 images 接口时仍只发一发', async (t) => {
     const { w, debug } = fixture(t, Object.assign({}, GPT, { genEndpoint: 'https://gpt.test/v1/images/generations' }));
     const calls = stub(w, [[400, SAFE_BODY]]);

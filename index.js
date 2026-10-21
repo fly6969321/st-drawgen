@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.5
+ *  生图工坊 · DrawGen v1.8.6
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -67,12 +67,15 @@
  *    ③只摘聊天里的引用、不删服务器文件（文件交给「存图天数」统一清，判错了还能用聊天备份找回）。
  *    另撤掉 1.8.4 那条「标记少了就清掉编号 ≥ 标记数的槽」——自动生图的槽位是 tags.length-1，
  *    一楼多条标记只生一张图时，图正好落在最后那个槽上，删掉一条标记就把它砍了。
+ *  · v1.8.6 完整调用链审查：思考文本不再当提示词；chat 返回 200 后解析失败不再重复扣费；
+ *    停止可贯穿图片下载和上传；指定 images 接口时不会被代理选项挡住；
+ *    旧图清理同步处理所有 swipe 快照，编辑中的临时正文不触发清图；看门狗解锁后旧提取结果失效。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.5";
+    const VERSION = "1.8.6";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1264,7 +1267,8 @@
         ];
 
     let currentDesc = "", currentIdx = -1, processing = false, initialized = false;
-    let extAbort = null, extUserAbort = false;
+    let extractEpoch = 0;
+    const extAborts = new Set();
     /* 在飞的生图控制器。并发是真会发生的（主模型自己写标记那条路是串行循环，
        不受提取锁管；她同时手点另一楼的 🖼 就并发了），单例会被后发者覆盖，
        先发的那个就再也停不掉、钱继续烧。 */
@@ -2143,30 +2147,33 @@
 
     /* 落盘：酒馆的 saveChat 是 async，之前到处裸调且空 catch，失败和竞态都看不见。
        统一走这里：同一帧内多次改动只落一次，失败明确提示（图/注入丢了得让她知道）。 */
-    let chatSaveTimer = null, chatSaveWaiters = 0;
+    let chatSaveTimer = null, chatSaveWaiters = [];
     function persistChat(why) {
         const c = ctx();
         if (!c || typeof c.saveChat !== "function") return Promise.resolve(false);
         if (chatSaveTimer) clearTimeout(chatSaveTimer);
-        chatSaveWaiters++;
         return new Promise(function (resolve) {
+            chatSaveWaiters.push({ resolve: resolve, why: why || "" });
             chatSaveTimer = setTimeout(function () {
                 chatSaveTimer = null;
-                const n = chatSaveWaiters; chatSaveWaiters = 0;
+                const waiters = chatSaveWaiters; chatSaveWaiters = [];
+                const n = waiters.length;
+                const saveWhy = waiters.length ? waiters[waiters.length - 1].why : (why || "");
+                const finish = function (ok) { waiters.forEach(function (w) { w.resolve(ok); }); };
                 let r;
                 try { r = c.saveChat(); } catch (e) {
-                    log("落盘失败(" + (why || "") + "):", e && e.message || e);
+                    log("落盘失败(" + saveWhy + "):", e && e.message || e);
                     toast("落盘失败，刷新前这些改动可能丢：" + (e && e.message || e), false);
-                    return resolve(false);
+                    return finish(false);
                 }
                 if (r && typeof r.then === "function") {
-                    r.then(function () { log("已落盘 ×" + n + " (" + (why || "") + ")"); resolve(true); },
+                    r.then(function () { log("已落盘 ×" + n + " (" + saveWhy + ")"); finish(true); },
                            function (e) {
-                               log("落盘失败(" + (why || "") + "):", e && e.message || e);
+                               log("落盘失败(" + saveWhy + "):", e && e.message || e);
                                toast("落盘失败，刷新前这些改动可能丢：" + (e && e.message || e), false);
-                               resolve(false);
+                               finish(false);
                            });
-                } else resolve(true);
+                } else finish(true);
             }, 40);
         });
     }
@@ -2502,7 +2509,6 @@
                     if (parts.join("").trim()) return parts.join("\n").trim();
                 }
                 if (msg.text) return String(msg.text).trim();
-                if (msg.reasoning_content && String(msg.reasoning_content).trim()) return String(msg.reasoning_content).trim();
             }
             if (ch.text) return String(ch.text).trim();
             if (ch.delta && ch.delta.content) return String(ch.delta.content).trim();
@@ -2522,8 +2528,10 @@
         if (!c.extEndpoint) throw new Error("请先配置提取 API 地址");
         if (!c.extModel) throw new Error("请先选择提取模型");
 
-        extUserAbort = false;
-        if (typeof AbortController !== "undefined") extAbort = new AbortController();
+        const abortReq = {
+            controller: typeof AbortController !== "undefined" ? new AbortController() : null,
+            userAborted: false
+        };
 
         const systemPrompt = (activeSystemPrompt() || {}).value || DEFAULT_SYS_EMO;
         const body = {
@@ -2560,18 +2568,25 @@
         }
 
         const fetchOptions = { method: "POST", headers: headers, body: JSON.stringify(reqBody) };
-        if (extAbort) fetchOptions.signal = extAbort.signal;
+        extAborts.add(abortReq);
+        if (abortReq.controller) fetchOptions.signal = abortReq.controller.signal;
 
-        let res;
+        let res, raw;
         try {
             res = await fetchWithTimeout(url, fetchOptions, Number(c.requestTimeout || 0) * 1000);
+            raw = await res.text();
         } catch (e) {
-            extAbort = null;
+            if (abortReq.userAborted) {
+                const aborted = new Error("请求已被打断");
+                aborted.name = "AbortError";
+                aborted.sdgUserAbort = true;
+                throw aborted;
+            }
             throw e;
+        } finally {
+            extAborts.delete(abortReq);
         }
 
-        const raw = await res.text();
-        extAbort = null;
         if (!res.ok) throw new Error("API " + res.status + "：" + raw.slice(0, 220));
 
         const data = safeJson(raw, null);
@@ -2976,11 +2991,12 @@
                 body: JSON.stringify({ model: c.genModel, messages: [{ role: "user", content: parts }], size: size, quality: quality || undefined })
             });
             if (resp.ok) {
+                /* 200 可能已经计费；解析或读 body 失败也不能再请求 images 兜底。 */
+                charged = true;
                 const result = await readOpenAIResponse(resp);
                 const u = imgUrlFromChat(result);
                 if (u) { const img = await normalizeImageToDataUrl(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "chat" }; }
                 lastErr = "chat 接口响应中没有图片";
-                charged = true;
             } else {
                 const t = await resp.text();
                 lastErr = "chat 接口 " + siteErrorBrief(resp.status, t);
@@ -2990,11 +3006,11 @@
         } catch (e) {
             const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
             lastErr = "chat 接口网络错误: " + (e && e.message || e);
-            canFallback = true;
+            canFallback = !charged;
         }
 
         /* ② 兜底：images/generations（后端代理通道没有这一兜底） */
-        if (c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
+        if (!imagesOnly && c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
             ctl.dispose();
             throw new Error(lastErr || "chat 接口生图失败");
         }
@@ -3050,13 +3066,18 @@
         if (!u) return "";
         if (String(u).startsWith("data:image/")) return u;
         try { return await dataUrlFromUrl(u, signal); }
-        catch (e) { log("下载失败，直接用 URL 兜底:", e.message); return u; }
+        catch (e) {
+            /* 停止/超时信号必须向上传递；吞掉 AbortError 会把中止的生成伪装成成功并落库 URL。 */
+            if (signal && signal.aborted) throw e;
+            log("下载失败，直接用 URL 兜底:", e.message); return u;
+        }
     }
 
     /* 把生成的图（dataURL）上传到酒馆服务器存成文件，聊天记录里只留链接。
        不上传的话整张图的 base64 会写进聊天文件，几十次生图后聊天文件上百 MB，
        手机端 Node 读进内存直接 OOM 崩溃。上传失败则原样返回（老行为兜底）。 */
     async function persistGenImage(imageUrl) {
+        let ctl = null;
         try {
             if (!String(imageUrl).startsWith("data:image/")) return imageUrl;
             const cont = ctx();
@@ -3067,17 +3088,24 @@
             const format = /image\/jpe?g/.test(meta) ? "jpeg" : (/image\/webp/.test(meta) ? "webp" : (/image\/gif/.test(meta) ? "gif" : "png"));
             const chName = (cont.characterId !== undefined && cont.characters && cont.characters[cont.characterId]) ? String(cont.characters[cont.characterId].name || "") : "";
             const filename = "sdg_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+            /* 生图接口已返回后仍在保存中；这段也要能被「停止」和生图超时掐断。 */
+            ctl = createGenController();
             const res = await fetch("/api/images/upload", {
                 method: "POST",
                 headers: cont.getRequestHeaders(),
-                body: JSON.stringify({ image: b64, format: format, ch_name: chName, filename: filename })
+                body: JSON.stringify({ image: b64, format: format, ch_name: chName, filename: filename }),
+                signal: ctl.signal
             });
             if (!res.ok) { log("图片上传服务器失败，保留内嵌存储:", res.status); return imageUrl; }
             const j = await res.json();
             if (j && j.path) { log("图片已存服务器:", j.path); return String(j.path).replace(/^\/+/, ""); }
             log("上传响应缺少 path，保留内嵌存储");
             return imageUrl;
-        } catch (e) { log("图片上传异常，保留内嵌存储:", e && e.message); return imageUrl; }
+        } catch (e) {
+            const ae = ctl && genAbortError(ctl);
+            if (ae) throw ae;
+            log("图片上传异常，保留内嵌存储:", e && e.message); return imageUrl;
+        } finally { if (ctl) ctl.dispose(); }
     }
 
     /* ——— 旧图清理 ———
@@ -3103,35 +3131,45 @@
             return res.ok || res.status === 404;
         } catch (e) { log("删图失败:", e && e.message); return false; }
     }
-    /* 摘掉当前聊天里指向超期图的引用，返回摘掉的路径 */
+    function pruneExpiredGallery(g, cutoff, dropped) {
+        if (!g || typeof g !== "object") return false;
+        let touched = false;
+        for (const sk in g) {
+            const sw = g[sk];
+            if (!sw || typeof sw !== "object") continue;
+            for (const slot in sw) {
+                const r = sw[slot];
+                if (!r || !Array.isArray(r.list)) continue;
+                const keep = r.list.filter(function (u) {
+                    const t = sdgFileTime(u);
+                    if (t && t < cutoff) { if (dropped.indexOf(u) < 0) dropped.push(u); return false; }
+                    return true;
+                });
+                if (keep.length === r.list.length) continue;
+                touched = true;
+                if (keep.length) {
+                    r.list = keep;
+                    r.cur = Math.min(Math.max(Number(r.cur) || 0, 0), keep.length - 1);
+                } else delete sw[slot];
+            }
+            if (!Object.keys(sw).length) delete g[sk];
+        }
+        return touched;
+    }
+    /* 摘掉当前聊天里指向超期图的引用，返回摘掉的路径。
+       swipe_info 各条回复也保存过图库快照，必须同时清理，避免切 swipe 时把旧引用合并回来。 */
     function dropExpiredRefs(cutoff) {
         const dropped = [];
         try {
             (ctx().chat || []).forEach(function (msg) {
-                const g = msg && msg.extra && msg.extra.sdg_gal;
-                if (!g || typeof g !== "object") return;
-                let touched = false;
-                for (const sk in g) {
-                    const sw = g[sk];
-                    if (!sw || typeof sw !== "object") continue;
-                    for (const slot in sw) {
-                        const r = sw[slot];
-                        if (!r || !Array.isArray(r.list)) continue;
-                        const keep = r.list.filter(function (u) {
-                            const t = sdgFileTime(u);
-                            if (t && t < cutoff) { dropped.push(u); return false; }
-                            return true;
-                        });
-                        if (keep.length === r.list.length) continue;
-                        touched = true;
-                        if (keep.length) {
-                            r.list = keep;
-                            r.cur = Math.min(Math.max(Number(r.cur) || 0, 0), keep.length - 1);
-                        } else delete sw[slot];
-                    }
-                    if (!Object.keys(sw).length) delete g[sk];
-                }
-                if (touched) syncSwipeExtra(msg);
+                if (!msg) return;
+                const g = msg.extra && msg.extra.sdg_gal;
+                let currentTouched = pruneExpiredGallery(g, cutoff, dropped);
+                if (Array.isArray(msg.swipe_info)) msg.swipe_info.forEach(function (slot) {
+                    const snapGal = slot && slot.extra && slot.extra.sdg_gal;
+                    if (pruneExpiredGallery(snapGal, cutoff, dropped) && slot === swipeInfoSlot(msg, false)) currentTouched = true;
+                });
+                if (currentTouched) syncSwipeExtra(msg);
             });
         } catch (e) { log("摘引用出错:", e && e.message); }
         return dropped;
@@ -3140,12 +3178,13 @@
         const days = Number(cfg().imageKeepDays) || 0;
         if (days <= 0) return 0;
         const now = Date.now();
-        if (!force && now - (Number(cfg().imageCleanAt) || 0) < 12 * 3600 * 1000) return 0;
-        save("imageCleanAt", now);
         const cutoff = now - days * 86400000;
 
         const dropped = dropExpiredRefs(cutoff);
         if (dropped.length) { persistChat("清理旧图"); try { renderAllImages(); } catch (e) {} }
+        /* 本地聊天引用按每个新打开的聊天都清；只有服务器目录扫描需要半天节流。 */
+        if (!force && now - (Number(cfg().imageCleanAt) || 0) < 12 * 3600 * 1000) return 0;
+        save("imageCleanAt", now);
 
         /* 服务器文件：列出 images 下各子目录逐个筛。
            路径格式跟上传时存下来的一致（images/<目录>/<文件>），删除端点认这个。 */
@@ -3828,6 +3867,7 @@
         const attempt = Number(opts.attempt || 0);
         if (processing) return;
         processing = true;
+        const runId = ++extractEpoch;
         /* 看门狗：万一请求既不返回也不抛错（中转站吞连接），finally 永不执行，
            processing 会一直是 true —— 之后每次自动提取都在上面那行被静默吞掉、
            提取按钮永久变灰。这里兜住，到点强制解锁并说清原因。 */
@@ -3837,7 +3877,9 @@
         const guardMs = (rt > 0 ? rt + 30 : 600) * 1000;
         let guard = setTimeout(function () {
             guard = null;
-            if (!processing) return;
+            if (runId !== extractEpoch) return;
+            /* 放开锁的同时让迟到的结果失效；底层请求仍按用户超时设置继续或自行结束。 */
+            extractEpoch++;
             processing = false;
             const bg = q("#sdg-btn-extract"); if (bg) bg.disabled = false;
             setStatus("提取没有响应，已解锁（可以再点提取）", C_ERR);
@@ -3854,6 +3896,7 @@
                 layerOpts = { prev: prevLayers(targetIdx), locks: locks };
             }
             const raw = await callSubAI(text, supplement || "", layerOpts);
+            if (runId !== extractEpoch) return;
             currentIdx = targetIdx;
 
             let desc = raw, layers = null;
@@ -3898,6 +3941,7 @@
                         if (promptReady) {
                             await persistChat("自动生图前保存注入提示词");
                             await waitForUiPaint();
+                            if (runId !== extractEpoch) return;
                         }
                     } catch (eInj) {
                         log("自动注入失败:", eInj.message);
@@ -3910,8 +3954,9 @@
                 }
             }
         } catch (e) {
+            if (runId !== extractEpoch) return;
             console.error(LOG, e);
-            const userAbort = e && e.name === "AbortError" && extUserAbort;
+            const userAbort = !!(e && e.sdgUserAbort);
             const msg = userAbort ? "请求已被打断" : (e && e.message || String(e));
             setStatus("提取失败: " + msg, C_ERR);
             if (!userAbort && !isConfigError(e) && attempt === 0 && opts.auto) {
@@ -3921,9 +3966,10 @@
             }
         } finally {
             if (guard) { clearTimeout(guard); guard = null; }
-            const btn2 = q("#sdg-btn-extract"); if (btn2) btn2.disabled = false;
-            extAbort = null; extUserAbort = false;
-            processing = false;
+            if (runId === extractEpoch) {
+                const btn2 = q("#sdg-btn-extract"); if (btn2) btn2.disabled = false;
+                processing = false;
+            }
         }
 
         /* 生图在提取锁外面跑。之前它被圈在锁内到 finally 才解锁，下一楼的提取得干等
@@ -4217,7 +4263,12 @@
     function onStop() {
         try {
             let n = 0;
-            if (extAbort) { extUserAbort = true; extAbort.abort(); extAbort = null; n++; }
+            n += extAborts.size;
+            extAborts.forEach(function (r) {
+                r.userAborted = true;
+                try { if (r.controller) r.controller.abort(); } catch (e) {}
+            });
+            extAborts.clear();
             n += genAborts.size;
             genAborts.forEach(function (r) { try { r.markUser(); } catch (e) {} });
             genAborts.clear();
@@ -4990,16 +5041,23 @@
                             if (m0 && restoreSwipeExtra(m0)) persistChat("swipe 恢复");
                         } catch (e) {}
                         /* 她刚把这楼的标记删掉（上一次重绘时还在）→ 图跟着清。
-                           只认编辑/更新事件里的这一楼，切 swipe 不算。 */
+                           编辑器打开时正文是临时态；先不清，保存后收到最终事件再判断。 */
                         if (evName !== "MESSAGE_SWIPED") {
                             try {
                                 const n1 = Number(i);
                                 const m1 = Number.isFinite(n1) ? (ctx().chat || [])[n1] : null;
-                                if (m1) dropIfMarkersGone(n1, m1);
+                                const floor = Number.isFinite(n1) ? q('#chat .mes[mesid="' + n1 + '"]') : null;
+                                if (m1 && !(floor && floor.querySelector(".edit_textarea"))) dropIfMarkersGone(n1, m1);
                             } catch (e) {}
                         }
                         setTimeout(function () {
-                            try { const n = Number(i); if (Number.isFinite(n)) renderFloorImage(n); else renderAllImages(); installMesButtons(); } catch (e) {}
+                            try {
+                                const n = Number(i);
+                                if (Number.isFinite(n)) {
+                                    renderFloorImage(n);
+                                } else renderAllImages();
+                                installMesButtons();
+                            } catch (e) {}
                         }, 120);
                     });
                 }
@@ -5074,7 +5132,8 @@
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
-            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone
+            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone,
+            parseChatResponse, callSubAI, runExtract, onStop, persistChat, persistGenImage
         };
     }
 
