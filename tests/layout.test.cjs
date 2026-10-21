@@ -118,6 +118,17 @@ test('grid cells really end on the same line once rendered', t => {
     assert.equal(d.defaultView.getComputedStyle(d.querySelector('.sdg-grid2')).alignItems, 'end');
 });
 
+test('inline floor images override host sticky positioning and scroll snapping', t => {
+    const hostCss = '<style>#chat .mes .mes_text img { position: sticky !important; scroll-snap-align: center !important; }</style>';
+    const dom = new JSDOM('<!doctype html>' + hostCss + '<style>' + css + '</style>' +
+        '<div id="chat"><div class="mes"><div class="mes_text"><img class="sdg-img"></div></div></div>');
+    t.after(() => dom.window.close());
+    const image = dom.window.document.querySelector('img.sdg-img');
+    const style = dom.window.getComputedStyle(image);
+    assert.equal(style.position, 'static', '楼层图跟随正文滚动，不继承宿主的 sticky');
+    assert.equal(style.scrollSnapAlign, 'none', '轻微滚动不会被吸附回图片位置');
+});
+
 test('version is consistent across manifest, package and source', t => {
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
     const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));

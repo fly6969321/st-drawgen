@@ -476,6 +476,13 @@
     box-shadow: 0 3px 12px rgba(0, 0, 0, 0.22);
 }
 .sdg-img.sdg-orphan { max-width: 100%; margin: 8px 0 4px; }
+.sdg-slot, .sdg-slot-body, .sdg-imgbox, .sdg-img { overflow-anchor: none; }
+/* 宿主主题有时会给聊天图片设置 sticky / snap；楼层图必须随正文正常滚动。 */
+#chat .mes .mes_text img.sdg-img {
+    position: static !important;
+    inset: auto !important;
+    scroll-snap-align: none !important;
+}
 .sdg-slot-regen {
     flex: 0 0 auto;
     padding: 2px 10px;

@@ -3805,6 +3805,15 @@
         }, 10000);
     }
 
+    function waitForUiPaint() {
+        return new Promise(function (resolve) {
+            if (typeof window.requestAnimationFrame === "function") {
+                window.requestAnimationFrame(function () { window.requestAnimationFrame(function () { resolve(); }); });
+            }
+            else setTimeout(resolve, 0);
+        });
+    }
+
     async function runExtract(text, supplement, opts) {
         opts = opts || {};
         const targetIdx = typeof opts.targetIdx === "number" ? opts.targetIdx : currentIdx;
@@ -3866,19 +3875,30 @@
             setPreview(desc);
 
             if (opts.auto) {
-                if (cfg().autoInject) {
+                /* 自动生图前先把提示词写入楼层并让楼层更新落盘、绘制出来。
+                   自动生图本身也依赖这条注入记录，因此即使单独关闭了「提取后自动注入」，
+                   开启自动生图时仍先注入；这样不会出现图已经生成、提示词之后才出现的顺序竞态。 */
+                const shouldInject = !!cfg().autoInject || (!!cfg().autoGenerate && !!cfg().enabled);
+                let promptReady = !shouldInject;
+                if (shouldInject) {
                     try {
                         const r = injectDescToMessage(desc, targetIdx, layers);
+                        promptReady = !!(r.injected || r.reason === "duplicate");
                         if (r.injected) setStatus("已注入 ✓", C_OK);
                         else if (r.reason === "duplicate") setStatus("这条已经在楼里了，没重复注入", C_WARN);
                         else setStatus("没注入（" + (r.reason || "未知") + "）", C_WARN);
+                        if (promptReady) {
+                            await persistChat("自动生图前保存注入提示词");
+                            await waitForUiPaint();
+                        }
                     } catch (eInj) {
                         log("自动注入失败:", eInj.message);
                         setStatus("注入失败: " + eInj.message, C_ERR);
                     }
                 }
                 if (cfg().autoGenerate && cfg().enabled) {
-                    pendingGen = { idx: targetIdx, desc: desc, layers: layers };
+                    if (promptReady) pendingGen = { idx: targetIdx, desc: desc, layers: layers };
+                    else setStatus("提示词未能注入楼层，已跳过自动生图", C_ERR);
                 }
             }
         } catch (e) {

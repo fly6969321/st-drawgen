@@ -247,6 +247,21 @@ test('image generation happens outside the extraction lock', t => {
     assert.ok(retry > 0 && retry < gen, 'scheduleRetry 留在提取自己的 catch 里');
 });
 
+test('automatic generation waits until the extracted prompt is injected, saved, and painted', t => {
+    const fn = source.slice(source.indexOf('async function runExtract'),
+                            source.indexOf('async function generateForFloor'));
+    const inject = fn.indexOf('const shouldInject =');
+    const save = fn.indexOf('await persistChat("自动生图前保存注入提示词")');
+    const paint = fn.indexOf('await waitForUiPaint();');
+    const generate = fn.indexOf('pendingGen = {');
+    assert.ok(inject >= 0 && inject < save && save < paint && paint < generate,
+        '注入、保存和绘制都必须先于登记自动生图');
+    assert.match(fn, /if \(promptReady\) pendingGen = \{/,
+        '注入失败时不能越过前置步骤直接生图');
+    assert.match(fn, /cfg\(\)\.autoGenerate && cfg\(\)\.enabled/,
+        '自动生图开启时必须满足注入前置条件');
+});
+
 test('extraction has a watchdog so the lock cannot stay stuck', t => {
     const fn = source.slice(source.indexOf('async function runExtract'),
                             source.indexOf('async function generateForFloor'));
