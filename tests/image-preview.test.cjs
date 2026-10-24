@@ -109,6 +109,45 @@ test('floor renderer leaves a message alone while SillyTavern is editing it', t 
     assert.equal(f.debug.renderFloorImage(0), true, '编辑结束后恢复正常重绘');
 });
 
+test('re-rendering a slot keeps the same img element instead of rebuilding it', t => {
+    const f = fixture(t);
+    const img1 = f.image();
+    f.debug.setImage(f.msg, 0, B);
+    f.debug.renderFloorImage(0);
+    const img2 = f.image();
+    assert.equal(img2, img1, 'img element must be reused so its height never collapses');
+    assert.equal(img2.getAttribute('src'), B);
+    assert.equal(f.text.querySelector('.sdg-pgn').textContent, '2/2');
+    f.click(f.text.querySelector('.sdg-pg[data-d="-1"]'));
+    assert.equal(f.image(), img1);
+    assert.equal(f.image().getAttribute('src'), A);
+});
+
+test('renderFloorImage retries shortly when the floor DOM does not exist yet', t => {
+    const f = fixture(t);
+    const scheduled = [];
+    f.w.setTimeout = fn => (scheduled.push(fn), scheduled.length);
+    f.w.document.querySelector('#chat .mes').remove();
+    assert.equal(f.debug.renderFloorImage(0, { domRetry: 2 }), false);
+    assert.equal(scheduled.length, 1, 'a retry must be scheduled');
+    f.w.document.getElementById('chat').insertAdjacentHTML('beforeend',
+        '<div class="mes" mesid="0"><div class="mes_text"></div></div>');
+    f.w.document.querySelector('#chat .mes_text').textContent = f.msg.mes;
+    scheduled.shift()();
+    const img = f.w.document.querySelector('#chat .mes_text img.sdg-img');
+    assert.ok(img, 'retry renders the slot once the floor exists');
+    assert.equal(img.getAttribute('src'), A);
+});
+
+test('slots come back after their marker text nodes were lost from the DOM', t => {
+    const f = fixture(t);
+    f.w.document.querySelector('.sdg-slot').remove();
+    f.debug.renderFloorImage(0);
+    assert.ok(f.text.querySelector('.sdg-slot'), 'slot is re-created from msg.mes');
+    assert.ok(f.image());
+    assert.equal(f.image().getAttribute('src'), A);
+});
+
 test('clicking the preview image does not close it; background does', t => {
     const f = fixture(t);
     f.click(f.image());

@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.6
+ *  生图工坊 · DrawGen v1.8.7
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -75,7 +75,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.6";
+    const VERSION = "1.8.7";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2274,7 +2274,7 @@
             }
             if (tags.length > made) replaceMarkersInDom(el);
         } catch (e) { log("rerenderFloor:", e.message); }
-        setTimeout(function () { try { renderFloorImage(idx); installMesButtons(); } catch (e) {} }, 60);
+        setTimeout(function () { try { renderFloorImage(idx, { domRetry: 2 }); installMesButtons(); } catch (e) {} }, 60);
     }
 
     /* ============================================================
@@ -2303,7 +2303,7 @@
             const want = !!(msg && !msg.is_user && injectRecord(msg));
             if (want && !hasR) put('<div title="生图工坊：按当前模板重新注入这层" class="mes_button ' + MES_BTN_REINJECT + ' fa-solid fa-palette interactable" tabindex="0"></div>');
             else if (!want && hasR) { try { hasR.remove(); } catch (e) {} }
-            const wantG = !!(msg && !msg.is_user && (hasAnyImage(msg) || findAllTags(msg.mes).length));
+            const wantG = !!(msg && !msg.is_user && (hasAnyImage(msg) || mayHaveMarkers(msg.mes)));
             if (wantG && !hasG) put('<div title="生图工坊：这层的标记全部重新生图" class="mes_button ' + MES_BTN_REGEN + ' fa-solid fa-image interactable" tabindex="0"></div>');
             else if (!wantG && hasG) { try { hasG.remove(); } catch (e) {} }
         });
@@ -3594,7 +3594,7 @@
             body.innerHTML = '<button type="button" class="sdg-genbtn">生成图片</button>';
             return;
         }
-        body.innerHTML =
+        const barHTML =
             '<div class="sdg-bar' + (open ? "" : " closed") + '">' +
                 '<span class="sdg-bar-l"><span class="sdg-bar-ico">📷</span><span class="sdg-bar-txt">点击查看图片</span></span>' +
                 '<span class="sdg-bar-r">' +
@@ -3603,7 +3603,30 @@
                         : '') +
                     '<button type="button" class="sdg-slot-regen" title="重新生成一张（旧图保留可翻看）">↻ 重画</button>' +
                 '</span>' +
-            '</div>' +
+            '</div>';
+        /* 原位更新：已渲染过的槽只换折叠条和 src，不重建 <img>。
+           重建会把图片区域高度打回 0、新图加载完再弹回限高，楼层内容整体上下跳，
+           往上翻的时候像被弹回图片那里（style.css 的 overflow-anchor 反制管不了这个）。 */
+        const prevImg = body.querySelector(".sdg-imgbox .sdg-img");
+        if (prevImg) {
+            const tmp = document.createElement("div");
+            tmp.innerHTML = barHTML;
+            const oldBar = body.querySelector(".sdg-bar");
+            if (oldBar) oldBar.replaceWith(tmp.firstChild);
+            else body.insertBefore(tmp.firstChild, body.firstChild);
+            const box = prevImg.parentNode;
+            if (box && box.classList.contains("sdg-imgbox")) box.style.display = open ? "" : "none";
+            if (prevImg.getAttribute("src") !== src) {
+                /* 换图前先按当前渲染高度垫底，新图加载完成再撤，加载间隙楼层不塌陷 */
+                const h = prevImg.offsetHeight || prevImg.clientHeight;
+                if (h) prevImg.style.minHeight = h + "px";
+                prevImg.onload = function () { prevImg.style.minHeight = ""; };
+                prevImg.onerror = function () { prevImg.style.minHeight = ""; };
+                prevImg.setAttribute("src", src);
+            }
+            return;
+        }
+        body.innerHTML = barHTML +
             '<div class="sdg-imgbox"' + (open ? "" : ' style="display:none"') + '>' +
                 '<img class="sdg-img" alt="生成图片">' +
             '</div>';
@@ -3746,7 +3769,7 @@
         return true;
     }
 
-    function renderFloorImage(idx) {
+    function renderFloorImage(idx, opts) {
         let msg = null;
         try { msg = (ctx().chat || [])[idx]; } catch (e) { return false; }
         if (!msg) return false;
@@ -3754,7 +3777,13 @@
         /* 编辑器代替 .mes_text 的这段时间保持 DOM 原样；保存/取消后由酒馆事件重绘。 */
         if (mesEl && mesEl.querySelector(".edit_textarea")) return false;
         const el = mesEl && mesEl.querySelector(".mes_text");
-        if (!el) return false;
+        if (!el) {
+            /* 楼层 DOM 还没建出来：非流式时酒馆先发 MESSAGE_RECEIVED、后 addOneMessage。
+               直接返回的话标记和「生成中」要等生图结束才显示，调用方带 domRetry 时稍等重试 */
+            const left = (opts && opts.domRetry) || 0;
+            if (left > 0) setTimeout(function () { try { renderFloorImage(idx, { domRetry: left - 1 }); } catch (e) {} }, 200);
+            return false;
+        }
         const tags = findAllTags(msg.mes);
         tagsSeen[tagsSeenKey(idx, msg)] = tags.length;
         const hide = cfg().hideTagText !== false;
@@ -3783,6 +3812,11 @@
             if (el.querySelectorAll(".sdg-slot").length < tags.length) replaceMarkersAcrossNodes(el);
             const orphan = el.querySelector("img.sdg-img.sdg-orphan"); if (orphan) orphan.remove();
         }
+        /* 标记文本不在 DOM 里（swipe/重绘竞态把文本节点吞过）：补回文本节点再转一遍，
+           否则这层的槽只能永远退到楼尾显示 */
+        const made = el.querySelectorAll(".sdg-slot").length;
+        for (let k = made; k < tags.length; k++) el.appendChild(document.createTextNode("\n\n" + tags[k].full));
+        if (tags.length > made) { replaceMarkersInDom(el); replaceMarkersAcrossNodes(el); }
         /* 第二遍：按文档顺序给槽编号，按状态填内容 */
         const slots = Array.prototype.slice.call(el.querySelectorAll(".sdg-slot"));
         if (!slots.length) {
@@ -3814,9 +3848,8 @@
         for (let i = 0; i < chat.length; i++) {
             const m = chat[i];
             if (!m || m.is_user) continue;
-            if (hasAnyImage(m) || findAllTags(m.mes).length) {
-                try { renderFloorImage(i); } catch (e) {}
-            }
+            if (!hasAnyImage(m) && !mayHaveMarkers(m.mes)) continue;
+            try { renderFloorImage(i); } catch (e) {}
         }
     }
 
@@ -3998,7 +4031,7 @@
         if (genBusy[key]) { setStatus("这张正在生图中", C_WARN); return ""; }
         genBusy[key] = true;
         const swipeAtStart = msg ? swipeKey(msg) : null;
-        if (msg) renderFloorImage(idx);
+        if (msg) renderFloorImage(idx, { domRetry: 2 });
         setStatus("正在生图…", C_OK);
         const t0 = Date.now();
         try {
@@ -4031,7 +4064,7 @@
             throw e;
         } finally {
             delete genBusy[key];
-            if (msg) { try { renderFloorImage(idx); installMesButtons(); } catch (e) {} }
+            if (msg) { try { renderFloorImage(idx, { domRetry: 2 }); installMesButtons(); } catch (e) {} }
         }
     }
     async function onGenSlot(idx, slot, force) {
@@ -4091,6 +4124,17 @@
         push("<draw>", "</draw>");
         mpCache = out; mpCacheKey = ck;
         return out;
+    }
+    /* 便宜预检：正文里有没有可能出现标记。聊天观察器每次变动都要扫全部楼层，
+       手机上流式期间每 250ms 一轮，全量正则太贵；先 indexOf 挡掉大多数楼层再走 findAllTags */
+    function mayHaveMarkers(text) {
+        const t = String(text || "");
+        if (!t) return false;
+        const pairs = markerPairs();
+        for (let k = 0; k < pairs.length; k++) {
+            if (t.indexOf(pairs[k].pre) >= 0 || t.indexOf(pairs[k].suf) >= 0) return true;
+        }
+        return false;
     }
     /* 楼层正文里所有标记，按出现顺序 → [{full, inner, pre, suf}] */
     function findAllTags(text) {
@@ -4156,7 +4200,9 @@
                 currentIdx = i;
                 layersFresh = false;
                 setPreview(tags[tags.length - 1].inner);
-                renderFloorImage(i);
+                /* 非流式时此刻楼层 DOM 可能还没建（酒馆先发事件后 addOneMessage），
+                   带 domRetry 让标记立刻变成槽位，而不是等生图结束才出现 */
+                renderFloorImage(i, { domRetry: 3 });
                 if (!cfg().autoGenerate) { setStatus("检测到 " + tags.length + " 个生图标记（自动生图已关闭）", C_WARN); return; }
                 setStatus("检测到 " + tags.length + " 个生图标记，直接生图…", C_OK);
                 (async function () {
@@ -4263,6 +4309,10 @@
     function onStop() {
         try {
             let n = 0;
+            /* 排队的自动提取 / 失败重试也一并取消，不然停了当前请求一会儿又自己跑起来 */
+            if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+            pendingAutoIdx = -1;
+            clearRetry();
             n += extAborts.size;
             extAborts.forEach(function (r) {
                 r.userAborted = true;
@@ -5030,6 +5080,19 @@
         const c = ctx();
         if (c.eventSource && c.event_types) {
             c.eventSource.on(c.event_types.MESSAGE_RECEIVED, onMsgReceived);
+            /* 酒馆在楼层 DOM 建好之后才发这个事件（非流式时 MESSAGE_RECEIVED 更早）：
+               在这里补一次渲染，主模型自己写的标记能立刻变成槽位显示 */
+            if (c.event_types.CHARACTER_MESSAGE_RENDERED) {
+                c.eventSource.on(c.event_types.CHARACTER_MESSAGE_RENDERED, function (i) {
+                    setTimeout(function () {
+                        try {
+                            const n = Number(i);
+                            if (Number.isFinite(n)) renderFloorImage(n);
+                            installMesButtons();
+                        } catch (e) {}
+                    }, 60);
+                });
+            }
             ["MESSAGE_SWIPED", "MESSAGE_UPDATED", "MESSAGE_EDITED"].forEach(function (evName) {
                 if (c.event_types[evName]) {
                     c.eventSource.on(c.event_types[evName], function (i) {
@@ -5065,6 +5128,16 @@
             if (c.event_types.CHAT_CHANGED) {
                 c.eventSource.on(c.event_types.CHAT_CHANGED, function () {
                     currentIdx = -1; layersFresh = false;
+                    /* 排队的自动提取/重试指向旧聊天的楼层号，换了聊天必须作废 */
+                    pendingAutoIdx = -1;
+                    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+                    clearRetry();
+                    /* 折叠状态按「楼号:槽位」记，tagsSeen 按楼号记 swipe——跨聊天都会串楼层，
+                       tagsSeen 串了会让清图逻辑把新聊天同楼号的图当成「她删了标记」误清掉 */
+                    for (const k in collapsed) delete collapsed[k];
+                    for (const k in tagsSeen) delete tagsSeen[k];
+                    /* 分层框还是旧聊天的内容，不清会把旧场景沿用到新聊天 */
+                    setLayerBoxes({});
                     setTimeout(function () { renderAllImages(); installMesButtons(); }, 300);
                     setTimeout(function () { cleanupOldImages(false); }, 4000);
                 });
