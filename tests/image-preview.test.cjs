@@ -148,6 +148,33 @@ test('slots come back after their marker text nodes were lost from the DOM', t =
     assert.equal(f.image().getAttribute('src'), A);
 });
 
+test('mid-reroll floors do not get stale markers appended back', t => {
+    const f = fixture(t);
+    /* re-roll 进行中：swipe_id 已前移到空洞、msg.mes 还是带标记的旧回复、DOM 已是新回复文本 */
+    f.msg.mes = 'old reply image###stale### end';
+    f.msg.swipes = ['old reply image###stale### end'];
+    f.msg.swipe_id = 1;
+    f.text.textContent = 'new partial reply';
+    f.w.document.querySelector('.mes').setAttribute('data-sdg-swipe', '0');
+    f.debug.renderFloorImage(0);
+    assert.equal(f.text.querySelector('.sdg-slot'), null, '不得把旧标记补回正在重roll的楼层');
+    assert.ok(f.text.textContent.includes('new partial reply'), '新回复文本原样保留');
+});
+
+test('model-imitated markers are stripped for the normal pipeline when auto-extract is on', t => {
+    const f = fixture(t);
+    assert.equal(f.debug.stripImageTag('…\n\nimage###…###').trim(), '…',
+        'image### 样式的模仿标记要能剥干净');
+    assert.equal(f.debug.stripImageTag('text <draw>foo</draw> tail').includes('<draw>'), false,
+        '<draw> 样式的模仿标记要能剥干净');
+    const onMsg = source.slice(source.indexOf('function onMsgReceived'),
+                               source.indexOf('function runPendingAutoExtract'));
+    assert.ok(onMsg.includes('cfg().autoExtract ? stripImageTag(msg.mes)'),
+        '自动提取开着时先剥模型自带的标记');
+    assert.ok(onMsg.indexOf('剥掉模型自己写的生图标记') < onMsg.indexOf('pendingAutoIdx = i'),
+        '剥完落回正常自动提取流程');
+});
+
 test('clicking the preview image does not close it; background does', t => {
     const f = fixture(t);
     f.click(f.image());

@@ -1,8 +1,9 @@
 /*
- *  生图工坊 · DrawGen v1.8.7
+ *  生图工坊 · DrawGen v1.8.8
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
+ *    （主模型自己模仿写的标记：自动提取开着时剥掉走正常管线；关着时才直接按标记生图）
  *
  *  · 楼层正文里每一个 image###…### 标记原位换成图片，一楼几个标记几张图；
  *    没图的标记显示「生成图片」按钮，出图后是折叠条，重画保留历史可翻页
@@ -75,7 +76,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.7";
+    const VERSION = "1.8.8";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -3813,10 +3814,18 @@
             const orphan = el.querySelector("img.sdg-img.sdg-orphan"); if (orphan) orphan.remove();
         }
         /* 标记文本不在 DOM 里（swipe/重绘竞态把文本节点吞过）：补回文本节点再转一遍，
-           否则这层的槽只能永远退到楼尾显示 */
+           否则这层的槽只能永远退到楼尾显示。
+           但 re-roll 进行中不算（swipe_id 已前移、swipes[new] 还是空洞，msg.mes 仍是旧回复）——
+           这时补回的会是旧标记，重roll出来的楼层凭空多出旧框 */
+        const swipesArr = Array.isArray(msg.swipes) ? msg.swipes : null;
+        const swipeSettled = !swipesArr || !Number.isInteger(msg.swipe_id) ||
+            (swipesArr[msg.swipe_id] != null && swipesArr[msg.swipe_id] === msg.mes);
         const made = el.querySelectorAll(".sdg-slot").length;
-        for (let k = made; k < tags.length; k++) el.appendChild(document.createTextNode("\n\n" + tags[k].full));
-        if (tags.length > made) { replaceMarkersInDom(el); replaceMarkersAcrossNodes(el); }
+        if (swipeSettled && made < tags.length) {
+            for (let k = made; k < tags.length; k++) el.appendChild(document.createTextNode("\n\n" + tags[k].full));
+            replaceMarkersInDom(el);
+            replaceMarkersAcrossNodes(el);
+        }
         /* 第二遍：按文档顺序给槽编号，按状态填内容 */
         const slots = Array.prototype.slice.call(el.querySelectorAll(".sdg-slot"));
         if (!slots.length) {
@@ -4194,24 +4203,36 @@
                 if (i < 0 || !msg) return;
             }
 
-            /* 主模型自己写了标记：不叫副AI，每个标记各生一张 */
+            /* 主模型自己写了标记（它看历史楼层都以标记结尾，照猫画虎带了一个）。
+               自动提取开着时按她要的流程走：剥掉模型自带的标记，回到「副AI提取 → 注入出框 → 生图」，
+               不然重roll出来的新楼自己带着框、还跳过提取直接生图。
+               自动提取关着、或剥不干净时保留老行为：模型写的标记直接逐个生图。 */
             const tags = findAllTags(msg.mes);
             if (tags.length) {
-                currentIdx = i;
-                layersFresh = false;
-                setPreview(tags[tags.length - 1].inner);
-                /* 非流式时此刻楼层 DOM 可能还没建（酒馆先发事件后 addOneMessage），
-                   带 domRetry 让标记立刻变成槽位，而不是等生图结束才出现 */
-                renderFloorImage(i, { domRetry: 3 });
-                if (!cfg().autoGenerate) { setStatus("检测到 " + tags.length + " 个生图标记（自动生图已关闭）", C_WARN); return; }
-                setStatus("检测到 " + tags.length + " 个生图标记，直接生图…", C_OK);
-                (async function () {
-                    for (let s = 0; s < tags.length; s++) {
-                        if (getImage(msg, s)) continue;
-                        try { await generateForFloor(i, tags[s].inner, s); } catch (e) {}
-                    }
-                })();
-                return;
+                const stripped = cfg().autoExtract ? stripImageTag(msg.mes) : msg.mes;
+                if (cfg().autoExtract && String(stripped).trim() !== String(msg.mes).trim() && !findAllTags(stripped).length) {
+                    msg.mes = String(stripped);
+                    syncSwipe(msg);
+                    persistChat("剥掉模型自己写的生图标记");
+                    setStatus("已剥掉模型自带的生图标记，走正常提取流程", C_WARN);
+                    rerenderFloor(i);
+                } else {
+                    currentIdx = i;
+                    layersFresh = false;
+                    setPreview(tags[tags.length - 1].inner);
+                    /* 非流式时此刻楼层 DOM 可能还没建（酒馆先发事件后 addOneMessage），
+                       带 domRetry 让标记立刻变成槽位，而不是等生图结束才出现 */
+                    renderFloorImage(i, { domRetry: 3 });
+                    if (!cfg().autoGenerate) { setStatus("检测到 " + tags.length + " 个生图标记（自动生图已关闭）", C_WARN); return; }
+                    setStatus("检测到 " + tags.length + " 个生图标记，直接生图…", C_OK);
+                    (async function () {
+                        for (let s = 0; s < tags.length; s++) {
+                            if (getImage(msg, s)) continue;
+                            try { await generateForFloor(i, tags[s].inner, s); } catch (e) {}
+                        }
+                    })();
+                    return;
+                }
             }
 
             if (!cfg().autoExtract) { currentIdx = i; return; }
