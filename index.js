@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.8
+ *  生图工坊 · DrawGen v1.8.9
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -71,12 +71,14 @@
  *  · v1.8.6 完整调用链审查：思考文本不再当提示词；chat 返回 200 后解析失败不再重复扣费；
  *    停止可贯穿图片下载和上传；指定 images 接口时不会被代理选项挡住；
  *    旧图清理同步处理所有 swipe 快照，编辑中的临时正文不触发清图；看门狗解锁后旧提取结果失效。
+ *  · v1.8.9 图片与工具栏等宽，竖图不再因限高缩窄；异步生图只更新原回复图库，
+ *    重画按当前标记匹配分层记录；切回复或改正文后不写入旧提取结果、不继续批量生图。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.8";
+    const VERSION = "1.8.9";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2113,6 +2115,16 @@
             const slot = swipeInfoSlot(msg, true, forceId);
             if (!slot) return;
             const ex = (msg && msg.extra) || {};
+            /* 异步生图回来时可能已切回复：只同步目标回复的图库，不能把当前回复
+               的描述/分层记录覆盖到它身上，其他回复的图库快照也原样保留。 */
+            if (forceId != null && String(forceId) !== swipeKey(msg)) {
+                const sk = String(forceId), gal = ex.sdg_gal;
+                if (gal && gal[sk]) {
+                    if (!slot.extra.sdg_gal || typeof slot.extra.sdg_gal !== "object") slot.extra.sdg_gal = {};
+                    slot.extra.sdg_gal[sk] = gal[sk];
+                }
+                return;
+            }
             SDG_EXTRA_KEYS.forEach(function (k) {
                 if (ex[k] === undefined) delete slot.extra[k];
                 else slot.extra[k] = ex[k];
@@ -3318,6 +3330,11 @@
         /* swipeOverride：生图是异步的，等图回来时她可能已经左右滑到别的回复了。
            不指定的话 swipeKey 读到的是「现在」那条，图就归错了人。 */
         const g = galWrite(msg), sk = swipeOverride || swipeKey(msg);
+        if (sk !== swipeKey(msg)) {
+            const origin = swipeInfoSlot(msg, false, sk);
+            const saved = origin && origin.extra.sdg_gal && origin.extra.sdg_gal[sk];
+            if (saved) g[sk] = saved;
+        }
         if (!g[sk] || typeof g[sk] !== "object") g[sk] = {};
         let r = g[sk][String(slot)];
         if (!r || !Array.isArray(r.list)) r = g[sk][String(slot)] = { list: [], cur: 0 };
@@ -3391,7 +3408,7 @@
     function slotHTML(innerHtml) {
         return '<div class="sdg-slot"><div class="sdg-slot-body"></div><div class="sdg-tag">' + innerHtml + '</div></div>';
     }
-    /* 楼层图限高 = 「键盘未弹出时」视口高的 70%，定格成固定像素。
+    /* 无工具栏的孤立图限高 = 「键盘未弹出时」视口高的 70%，定格成固定像素。
        vh/dvh 这类视口单位在手机上会被键盘挤压：点输入框弹出键盘 → 视口变矮 → 限高跟着缩水
        → 图按比例连宽带窄。固定 px 后键盘不再影响；视口变大（刷新/转屏）只往大更新，不往小缩 */
     let SDG_CAP_H = 0;
@@ -3633,12 +3650,11 @@
             '</div>';
         const im = body.querySelector("img");
         if (im) {
-            /* 内联样式限制楼层里图片的高度：竖版长图折叠条展开后也尽量一屏内可见。
-               限高用固定 px（maxImgH），不用 vh/dvh——那两个单位会被手机键盘挤压导致图缩 */
+            /* 与上方工具栏同宽，按原比例展开；限高会让竖图等比缩窄而与栏错位。 */
             im.style.maxWidth = "100%";
-            im.style.width = "auto";
+            im.style.width = "100%";
             im.style.height = "auto";
-            im.style.maxHeight = maxImgH();
+            im.style.maxHeight = "none";
             im.style.objectFit = "contain";
             im.setAttribute("src", src);
             bindImagePreview(im);
@@ -3903,9 +3919,19 @@
         });
     }
 
+    function floorTarget(idx) {
+        const msg = (ctx().chat || [])[idx];
+        return { idx: idx, msg: msg, swipe: swipeKey(msg), text: String(msg && msg.mes || "") };
+    }
+    function floorTargetMatches(target) {
+        const msg = (ctx().chat || [])[target.idx];
+        return msg === target.msg && swipeKey(msg) === target.swipe && String(msg && msg.mes || "") === target.text;
+    }
+
     async function runExtract(text, supplement, opts) {
         opts = opts || {};
         const targetIdx = typeof opts.targetIdx === "number" ? opts.targetIdx : currentIdx;
+        const target = floorTarget(targetIdx);
         const attempt = Number(opts.attempt || 0);
         if (processing) return;
         processing = true;
@@ -3939,6 +3965,10 @@
             }
             const raw = await callSubAI(text, supplement || "", layerOpts);
             if (runId !== extractEpoch) return;
+            if (!floorTargetMatches(target)) {
+                setStatus("提取期间回复已切换或修改，已跳过旧结果，请在目标回复重新提取", C_WARN);
+                return;
+            }
             currentIdx = targetIdx;
 
             let desc = raw, layers = null;
@@ -3976,6 +4006,7 @@
                 if (shouldInject) {
                     try {
                         const r = injectDescToMessage(desc, targetIdx, layers);
+                        target.text = String(target.msg && target.msg.mes || "");
                         promptReady = !!(r.injected || r.reason === "duplicate");
                         if (r.injected) setStatus("已注入 ✓", C_OK);
                         else if (r.reason === "duplicate") setStatus("这条已经在楼里了，没重复注入", C_WARN);
@@ -3984,6 +4015,10 @@
                             await persistChat("自动生图前保存注入提示词");
                             await waitForUiPaint();
                             if (runId !== extractEpoch) return;
+                            if (!floorTargetMatches(target)) {
+                                setStatus("提示词已保存到原回复；回复已切换或修改，已跳过自动生图", C_WARN);
+                                return;
+                            }
                         }
                     } catch (eInj) {
                         log("自动注入失败:", eInj.message);
@@ -3997,6 +4032,10 @@
             }
         } catch (e) {
             if (runId !== extractEpoch) return;
+            if (!floorTargetMatches(target)) {
+                setStatus("回复已切换或修改，已停止原回复的提取及重试", C_WARN);
+                return;
+            }
             console.error(LOG, e);
             const userAbort = !!(e && e.sdgUserAbort);
             const msg = userAbort ? "请求已被打断" : (e && e.message || String(e));
@@ -4029,10 +4068,18 @@
         const tags = msg ? findAllTags(msg.mes) : [];
         if (typeof slot !== "number" || slot < 0) slot = tags.length ? tags.length - 1 : 0;
         desc = String(desc || "").trim();
+        const explicitDesc = !!desc;
         const rec = msg ? injectRecord(msg) : null;
         if (!desc && tags[slot]) desc = tags[slot].inner;
         if (!desc && rec) desc = rec.desc;
-        if (!layers && rec) layers = rec.layers;
+        /* 一楼可有多个标记，旧版本也可能留下别条 swipe 的记录。
+           只有描述或保存的标记与本槽相符时，才用记录里的分层填画风模板。 */
+        const samePrompt = (a, b) => String(a || "").trim().replace(/\s+/g, " ") === String(b || "").trim().replace(/\s+/g, " ");
+        /* 旧 XML 模板只保存 sdg_env，没有 sdg_tag；按当前模板重建后仍须完整匹配。 */
+        const savedTag = (msg && msg.extra && msg.extra.sdg_tag) || (rec ? buildInjectTag(rec.desc, rec.layers) : "");
+        const recordMatches = rec && (samePrompt(desc, rec.desc) || (!explicitDesc && tags[slot] && savedTag &&
+            findAllTags(savedTag).some(function (tag) { return samePrompt(tag.full, tags[slot].full); })));
+        if (!layers && recordMatches) layers = rec.layers;
         if (!desc) throw new Error("没有可用的生图描述");
         if (idx >= 0) currentIdx = idx;
 
@@ -4054,8 +4101,12 @@
                     return image;
                 }
                 setImage(msg, slot, image, swipeAtStart);
-                if (!injectRecord(msg)) rememberInject(msg, buildInjectTag(desc, null), desc, layers || null);
                 const movedSwipe = swipeAtStart && swipeKey(msg) !== swipeAtStart;
+                const origin = movedSwipe ? swipeInfoSlot(msg, true, swipeAtStart) : null;
+                const recordTarget = movedSwipe ? (origin ? { extra: origin.extra } : null) : msg;
+                if (recordTarget && !injectRecord(recordTarget)) {
+                    rememberInject(recordTarget, tags[slot] ? tags[slot].full : buildInjectTag(desc, layers), desc, layers || null);
+                }
                 if (movedSwipe) syncSwipeExtraFor(msg, swipeAtStart);
                 else syncSwipeExtra(msg);
                 await persistChat("生图入库");
@@ -4226,7 +4277,12 @@
                     if (!cfg().autoGenerate) { setStatus("检测到 " + tags.length + " 个生图标记（自动生图已关闭）", C_WARN); return; }
                     setStatus("检测到 " + tags.length + " 个生图标记，直接生图…", C_OK);
                     (async function () {
+                        const target = floorTarget(i);
                         for (let s = 0; s < tags.length; s++) {
+                            if (!floorTargetMatches(target)) {
+                                setStatus("回复已切换或修改，已停止原回复剩余标记的自动生图", C_WARN);
+                                break;
+                            }
                             if (getImage(msg, s)) continue;
                             try { await generateForFloor(i, tags[s].inner, s); } catch (e) {}
                         }
@@ -4322,8 +4378,13 @@
             if (!msg) return;
             const tags = findAllTags(msg.mes);
             if (!tags.length) { const rec = injectRecord(msg); await generateForFloor(idx, rec ? rec.desc : "", 0); return; }
+            const target = floorTarget(idx);
             for (let s = 0; s < tags.length; s++) {
-                try { await generateForFloor(idx, tags[s].inner, s); } catch (e) {}
+                if (!floorTargetMatches(target)) {
+                    setStatus("回复已切换或修改，已停止原回复剩余图片的重画", C_WARN);
+                    break;
+                }
+                try { await generateForFloor(idx, "", s); } catch (e) {}
             }
         } catch (e) { /* 已提示 */ }
     }
@@ -5191,7 +5252,7 @@
                     if (!SDG_CAP_H) return;
                     const before = SDG_CAP_H;
                     maxImgH();
-                    if (SDG_CAP_H > before) qa("img.sdg-img").forEach(function (im) { im.style.maxHeight = SDG_CAP_H + "px"; });
+                    if (SDG_CAP_H > before) qa("img.sdg-img.sdg-orphan").forEach(function (im) { im.style.maxHeight = SDG_CAP_H + "px"; });
                 } catch (e) {}
             }, { passive: true });
             setTimeout(function () { renderAllImages(); installMesButtons(); }, 800);
@@ -5227,7 +5288,7 @@
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
             genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone,
-            parseChatResponse, callSubAI, runExtract, onStop, persistChat, persistGenImage
+            parseChatResponse, callSubAI, runExtract, onStop, persistChat, persistGenImage, generateForFloor, onRegenFloor
         };
     }
 

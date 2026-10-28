@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.8 */
+/* 生图工坊 · DrawGen v1.8.9 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -476,6 +476,18 @@
     box-shadow: 0 3px 12px rgba(0, 0, 0, 0.22);
 }
 .sdg-img.sdg-orphan { max-width: 100%; margin: 8px 0 4px; }
+/* 槽内图片和工具栏共用宽度。width:auto 配合限高会把竖图等比缩窄，
+   但工具栏仍占满整行；取消槽内限高，长图按原比例展开，仍可点工具栏折叠。
+   覆盖旧 DOM 的内联尺寸及聊天主题的通用图片规则；无工具栏的孤立图仍保留限高。 */
+#chat .mes .mes_text .sdg-slot .sdg-imgbox > img.sdg-img {
+    display: block !important;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+}
 .sdg-slot, .sdg-slot-body, .sdg-imgbox, .sdg-img { overflow-anchor: none; }
 /* 宿主主题有时会给聊天图片设置 sticky / snap；楼层图必须随正文正常滚动。 */
 #chat .mes .mes_text img.sdg-img {

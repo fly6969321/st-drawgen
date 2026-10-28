@@ -7,12 +7,16 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 const A = 'data:image/png;base64,AAAA';
 const B = 'https://example.test/generated.png?token=a&size=1024';
 
-function fixture(t, { orphan = false, native = false, observer = true } = {}) {
+function fixture(t, { orphan = false, native = false, observer = true, settings = {}, viewport } = {}) {
     const dom = new JSDOM('<!doctype html><body><div id="extensions_settings"></div><div id="chat"><div class="mes" mesid="0"><div class="mes_text"></div><div class="mes_buttons"></div></div></div><textarea id="send_textarea"></textarea></body>', {
         url: 'https://tavern.test/', runScripts: 'outside-only', virtualConsole: new VirtualConsole().on("jsdomError", error => { throw error; }),
     });
     t.after(() => dom.window.close());
     const w = dom.window;
+    if (viewport) {
+        w.innerWidth = viewport.width;
+        w.innerHeight = viewport.height;
+    }
     const tasks = [];
     w.setTimeout = fn => (tasks.push(fn), tasks.length);
     w.clearTimeout = () => {};
@@ -24,7 +28,7 @@ function fixture(t, { orphan = false, native = false, observer = true } = {}) {
     };
     else w.HTMLDialogElement.prototype.showModal = undefined;
     const msg = { mes: orphan ? 'No marker' : 'Before image###a cat### after', is_user: false, extra: {} };
-    const context = { chat: [msg], extensionSettings: { 'st-drawgen': {} }, saveSettingsDebounced() {} };
+    const context = { chat: [msg], extensionSettings: { 'st-drawgen': settings }, saveSettingsDebounced() {} };
     w.SillyTavern = { getContext: () => context };
     const text = w.document.querySelector('.mes_text');
     text.textContent = msg.mes;
@@ -121,6 +125,76 @@ test('re-rendering a slot keeps the same img element instead of rebuilding it', 
     f.click(f.text.querySelector('.sdg-pg[data-d="-1"]'));
     assert.equal(f.image(), img1);
     assert.equal(f.image().getAttribute('src'), A);
+});
+
+test('slot rendering uses its container width on mobile and desktop without a portrait height cap', t => {
+    for (const viewport of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) {
+        const f = fixture(t, { viewport });
+        const img = f.image();
+        for (const [width, height] of [[900, 1600], [1600, 900], [200, 200]]) {
+            Object.defineProperty(img, 'naturalWidth', { configurable: true, value: width });
+            Object.defineProperty(img, 'naturalHeight', { configurable: true, value: height });
+            img.dispatchEvent(new f.w.Event('load'));
+            f.debug.renderFloorImage(0);
+            assert.equal(img.style.width, '100%', viewport.width + 'px viewport: 图片占满工具栏所在的槽宽');
+            assert.equal(img.style.maxWidth, '100%');
+            assert.equal(img.style.height, 'auto', width + '×' + height + ' 图片保留原比例');
+            assert.equal(img.style.maxHeight, 'none', '竖图不再被固定视口限高缩窄');
+        }
+    }
+});
+
+test('image width setting controls the whole slot while the image fills that slot', t => {
+    const f = fixture(t, { settings: { imageMaxWidth: 75 } });
+    const widthRule = () => f.w.document.querySelector('#sdg-imgw-style').sheet.cssRules[0];
+    assert.equal(widthRule().style.maxWidth, '75%', '已有用户宽度设置继续控制整个图片槽');
+    const input = f.w.document.querySelector('#sdg-imgw');
+    input.value = '50';
+    input.dispatchEvent(new f.w.Event('change', { bubbles: true }));
+    assert.equal(widthRule().style.maxWidth, '50%', '修改宽度设置会同步更新槽宽');
+    assert.equal(widthRule().style.getPropertyPriority('max-width'), 'important');
+    assert.equal(f.image().style.width, '100%', '图片宽度相对槽计算，不再单独缩窄');
+    assert.equal(f.image().style.maxHeight, 'none');
+});
+
+test('resize updates orphan height caps without capping slot images or shrinking on keyboard open', t => {
+    const f = fixture(t, { orphan: true, viewport: { width: 390, height: 844 } });
+    const orphan = f.image();
+    const initialCap = orphan.style.maxHeight;
+    f.msg.mes = 'image###portrait###';
+    f.text.textContent = f.msg.mes;
+    f.debug.renderFloorImage(0);
+    const slotImage = f.image();
+    f.text.appendChild(orphan); // Keep both display types in the chat for the same resize event.
+    f.w.innerHeight = 1200;
+    f.w.dispatchEvent(new f.w.Event('resize'));
+    assert.equal(orphan.style.maxHeight, '840px', '无工具栏图片保留随视口增大的限高');
+    assert.notEqual(orphan.style.maxHeight, initialCap);
+    assert.equal(slotImage.style.maxHeight, 'none', '转屏不能给槽内图加回限高');
+    f.w.innerHeight = 400;
+    f.w.dispatchEvent(new f.w.Event('resize'));
+    assert.equal(orphan.style.maxHeight, '840px', '键盘缩小视口不会把旧图一起缩小');
+    assert.equal(slotImage.style.width, '100%');
+    assert.equal(slotImage.style.maxHeight, 'none');
+});
+
+test('paging between portrait and landscape keeps the image node and clears the loading height reserve', t => {
+    const f = fixture(t);
+    const img = f.image();
+    Object.defineProperty(img, 'offsetHeight', { configurable: true, value: 640 });
+    f.debug.setImage(f.msg, 0, B);
+    f.debug.renderFloorImage(0);
+    assert.equal(f.image(), img, '换图期间复用 img，避免高度先塌陷');
+    assert.equal(img.style.minHeight, '640px', '新图加载前暂留原显示高度');
+    img.dispatchEvent(new f.w.Event('load'));
+    assert.equal(img.style.minHeight, '', '新图加载后移除临时高度，允许不同宽高比');
+    f.click(f.text.querySelector('.sdg-pg[data-d="-1"]'));
+    assert.equal(f.image(), img);
+    assert.equal(img.getAttribute('src'), A);
+    img.dispatchEvent(new f.w.Event('error'));
+    assert.equal(img.style.minHeight, '', '失败时也不能留下上一张图的固定高度');
+    assert.equal(img.style.width, '100%');
+    assert.equal(img.style.maxHeight, 'none');
 });
 
 test('renderFloorImage retries shortly when the floor DOM does not exist yet', t => {

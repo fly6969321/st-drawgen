@@ -129,6 +129,38 @@ test('inline floor images override host sticky positioning and scroll snapping',
     assert.equal(style.scrollSnapAlign, 'none', '轻微滚动不会被吸附回图片位置');
 });
 
+test('slot images share the toolbar width without a portrait height cap', t => {
+    const { rules } = sheet(t);
+    const rule = findRule(rules, '#chat .mes .mes_text .sdg-slot .sdg-imgbox > img.sdg-img');
+    assert.ok(rule, '工具栏下的图片有独立尺寸规则');
+    for (const [property, value] of Object.entries({
+        width: '100%', 'max-width': '100%', height: 'auto', 'max-height': 'none',
+        'box-sizing': 'border-box', margin: '0px', display: 'block',
+    })) {
+        assert.equal(rule.style.getPropertyValue(property), value, property + ' 保证图片按比例占满槽宽且边框不溢出');
+        assert.equal(rule.style.getPropertyPriority(property), 'important', property + ' 覆盖旧 DOM 的内联限高及宿主主题');
+    }
+    assert.ok(!rule.selectorText.includes('.sdg-orphan'), '不改变无工具栏图片的限高');
+});
+
+test('slot image sizing overrides a host theme while orphan images keep their height cap', t => {
+    const hostCss = '<style>#chat .mes .mes_text img { width: auto !important; max-height: 70vh !important; margin: 12px !important; }</style>';
+    const dom = new JSDOM('<!doctype html>' + hostCss + '<style>' + css + '</style>' +
+        '<div id="chat"><div class="mes"><div class="mes_text">' +
+        '<div class="sdg-slot"><div class="sdg-slot-body"><div class="sdg-bar">重画</div>' +
+        '<div class="sdg-imgbox"><img class="sdg-img"></div></div></div>' +
+        '<img class="sdg-img sdg-orphan"></div></div></div>');
+    t.after(() => dom.window.close());
+    const w = dom.window;
+    const style = w.getComputedStyle(w.document.querySelector('.sdg-slot img'));
+    assert.equal(style.width, '100%', '图片与占满槽宽的工具栏对齐');
+    assert.equal(style.height, 'auto', '横图、方图、竖图均保持原比例');
+    assert.equal(style.maxHeight, 'none', '竖图不再因达到视口限高而比工具栏窄');
+    assert.equal(style.boxSizing, 'border-box', '边框计算在总宽度内');
+    assert.equal(style.margin, '0px', '主题外边距不会让图片偏移');
+    assert.ok(Math.abs(parseFloat(w.getComputedStyle(w.document.querySelector('.sdg-orphan')).maxHeight) - w.innerHeight * 0.7) < 0.01);
+});
+
 test('version is consistent across manifest, package and source', t => {
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
     const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
