@@ -76,7 +76,16 @@ function fixture(t, overrides = {}) {
         if (error) throw error;
         return result;
     };
-    return { w, msg, settings, ctx, calls, saves, debug, finish, response, respond(fn) { respond = fn; },
+    const runAllTimers = async () => {
+        /* 固定轮数空转（不因当前没有定时器就提前退出）：jsdom 的 FileReader 等
+           在好几层微任务/宏任务之后才落地，循环要一直泵到它完成 */
+        for (let n = 0; n < 300; n++) {
+            for (const [id, task] of Array.from(timers.entries())) { timers.delete(id); task.fn(); }
+            for (let i = 0; i < 20; i++) await Promise.resolve();
+            await new Promise(resolve => setImmediate(resolve));
+        }
+    };
+    return { w, msg, settings, ctx, calls, saves, debug, finish, runAllTimers, response, respond(fn) { respond = fn; },
         setDownload(v) { downloadOk = v; }, setUpload(v) { uploadOk = v; }, setProxy(v) { proxyOk = v; },
         downloads: () => downloads, uploads: () => uploads, proxied: () => proxied };
 }
@@ -141,8 +150,19 @@ test('images 接口返回 url：同样下载 + 上传，落本地路径', async 
     f.respond(() => f.response({ data: [{ url: SIGNED }] }));
     assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
     assert.equal(f.calls.length, 1);
-    assert.equal(f.calls[0].body.response_format, 'url');
-    assert.equal(f.downloads(), 1);
+    assert.equal(f.calls[0].body.response_format, 'b64_json', '先要图片数据');
+    assert.equal(f.downloads(), 1, '站点仍回外链时才需要下载');
+    assert.equal(f.uploads(), 1);
+    assert.equal(f.debug.getImage(f.msg, 0), LOCAL);
+});
+
+test('images 接口回 b64_json：不下载、直接上传存本地', async t => {
+    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations' });
+    f.respond(() => f.response({ data: [{ b64_json: BASE64 }] }));
+    assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].body.response_format, 'b64_json');
+    assert.equal(f.downloads(), 0, '拿到图片数据就不用下载，不受跨域影响');
     assert.equal(f.uploads(), 1);
     assert.equal(f.debug.getImage(f.msg, 0), LOCAL);
 });
@@ -166,7 +186,7 @@ test('并发：全局已有生成时其它楼层不再付费，首个完成后�
     assert.equal(f.calls.length, 2);
 });
 
-test('参数类 400 退 images 时只去掉被拒的 response_format，其余请求不变', async t => {
+test('参数类 400：b64_json 被拒就改要 url 重试一次，其余请求不变', async t => {
     const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations' });
     f.respond(() => f.calls.length === 1
         ? f.response({ error: { message: 'Unsupported parameter: response_format' } }, 400)
@@ -174,10 +194,10 @@ test('参数类 400 退 images 时只去掉被拒的 response_format，其余请
     const result = await f.finish(f.debug.genImageUnified('a cat'));
     assert.equal(result.image, DATA, '外链被下载成图片数据');
     assert.equal(f.calls.length, 2);
-    assert.equal(f.calls[0].body.response_format, 'url');
-    assert.equal(Object.hasOwn(f.calls[1].body, 'response_format'), false);
-    const first = { ...f.calls[0].body }; delete first.response_format;
-    assert.deepEqual(f.calls[1].body, first, '仅删除被拒绝的参数，其余请求不变');
+    assert.equal(f.calls[0].body.response_format, 'b64_json', '先要图片数据');
+    assert.equal(f.calls[1].body.response_format, 'url', '被拒后改要外链');
+    const first = { ...f.calls[1].body }; first.response_format = 'b64_json';
+    assert.deepEqual(first, f.calls[0].body, '只有 response_format 变了，其余请求不变');
 });
 
 test('参数错误反复 400 只重试一次；无关 400 不重试', async t => {
@@ -228,4 +248,16 @@ test('旧的 DrawGenRecovered 引用（少了 user/ 前缀）会被纠正，楼�
     assert.equal(f.debug.healRecoveredUrl('user/images/DrawGenRecovered/x.png'), 'user/images/DrawGenRecovered/x.png', '已正确的引用不重复处理');
     assert.equal(f.debug.healRecoveredUrl('/images/DrawGenRecovered/y.png'), 'user/images/DrawGenRecovered/y.png', '带斜杠的也纠正');
     assert.equal(f.debug.healRecoveredUrl('http://127.0.0.1:8000/images/DrawGenRecovered/z.png'), 'user/images/DrawGenRecovered/z.png', '带域名的也纠正');
+});
+
+test('只存了外链会后台重试补存：下载恢复后把聊天里的外链换成本地路径', async t => {
+    const f = fixture(t);
+    f.setDownload(false);              // 生成时两条下载路都不通
+    assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), SIGNED);
+    assert.equal(f.debug.getImage(f.msg, 0), SIGNED, '先只存了外链');
+    f.setDownload(true);               // 网络恢复
+    await f.runAllTimers();            // 跑到 90 秒那次补存
+    assert.equal(f.debug.getImage(f.msg, 0), LOCAL, '外链被原地换成本地路径');
+    const saved = JSON.parse(f.saves.at(-1))[0];
+    assert.equal(saved.extra.sdg_gal['0']['0'].list.at(-1), LOCAL, '补存后落盘');
 });

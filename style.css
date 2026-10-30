@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.16 */
+/* 生图工坊 · DrawGen v1.8.17 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -130,9 +130,12 @@
 
 #sdg-status {
     min-height: 18px;
+    max-height: 96px;
+    overflow-y: auto;
     font-size: 12px;
     color: var(--sdg-fg2);
     word-break: break-all;
+    white-space: pre-wrap;
 }
 
 #sdg-panel #sdg-preview {

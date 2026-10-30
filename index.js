@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.16
+ *  生图工坊 · DrawGen v1.8.17
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -95,12 +95,17 @@
  *    下载常被跨域拦住，只能把外链写进聊天、1 小时后图裂。现在直连被拦就改走酒馆 /proxy/
  *    让服务器代下载（需 config.yaml 的 enableCorsProxy: true），两条都不通才存外链，
  *    并在状态条明说"只存了外链、可能过期"。按文件头识别图片类型，octet-stream 也能存。
+ *  · v1.8.17 ①images 兜底改回「先要 b64_json」：拿到图片数据就直接上传存本地，不用下载、
+ *    不受跨域影响；站点明确 400 拒绝这个参数才改要 url 重试一次。②下载失败只存了外链时，
+ *    后台自动重试补存（约 90 秒、10 分钟各一次：下载→上传，成功就把聊天里那条外链原地
+ *    换成本地路径；失败不动任何数据）。③状态条加高可滚动、失败原因不再被截断；
+ *    完成状态区分「已存本地 / 只存外链 / 只存内嵌数据」。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.16";
+    const VERSION = "1.8.17";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2927,9 +2932,76 @@
         } finally { if (ctl) ctl.dispose(); }
     }
 
+
+    /* —— 外链迟到补存 ——
+       生成时下载被拦（跨域等），只来得及把站点的外链写进聊天。这种外链通常还有一段有效期，
+       这里在后台有限次重试"下载 → 上传"，成功就把聊天里那条**完全相同**的外链原地换成本地路径。
+       只在内存里排队（重启即忘）；每步都核对：聊天没切走、引用没被换过；失败绝不改动任何数据。 */
+    const lateSaves = new Set();
+    function replaceGalleryRef(msg, slot, fromUrl, toPath) {
+        let changed = false;
+        const fixRec = function (rec) {
+            if (!rec || !Array.isArray(rec.list)) return;
+            for (let i = 0; i < rec.list.length; i++) if (rec.list[i] === fromUrl) { rec.list[i] = toPath; changed = true; }
+        };
+        const fixExtra = function (ex) {
+            if (!ex || typeof ex !== "object") return;
+            const gal = ex.sdg_gal;
+            if (gal && typeof gal === "object") Object.keys(gal).forEach(function (sk) {
+                const sw = gal[sk];
+                if (sw && typeof sw === "object") fixRec(sw[String(slot)]);
+            });
+            if (ex.sdg_images && typeof ex.sdg_images === "object" && ex.sdg_images[String(slot)] === fromUrl) { ex.sdg_images[String(slot)] = toPath; changed = true; }
+            if (ex.sdg_image === fromUrl) { ex.sdg_image = toPath; changed = true; }
+        };
+        if (msg) fixExtra(msg.extra);
+        if (msg && Array.isArray(msg.swipe_info)) msg.swipe_info.forEach(function (info) { if (info) fixExtra(info.extra); });
+        return changed;
+    }
+    function scheduleLateSave(idx, slot, url) {
+        const key = idx + "|" + slot + "|" + url;
+        if (lateSaves.has(key)) return;
+        lateSaves.add(key);
+        let chatAtStart = null;
+        try { chatAtStart = ctx().chat; } catch (e) { return; }
+        const delays = [90000, 10 * 60 * 1000];   /* 90 秒、10 分钟各试一次 */
+        const attempt = function (n) {
+            if (n >= delays.length) { lateSaves.delete(key); return; }
+            setTimeout(function () {
+                (async function () {
+                    try {
+                        const c = ctx();
+                        if (!c || c.chat !== chatAtStart) throw new Error("聊天已切换");
+                        const msg = (c.chat || [])[idx];
+                        if (!msg) throw new Error("楼层已不在");
+                        const ctl = createGenController();
+                        let dataUrl = "";
+                        try { dataUrl = await dataUrlFromUrl(url, ctl.signal); }
+                        finally { ctl.dispose(); }
+                        if (!String(dataUrl).startsWith("data:image/")) throw new Error("下载结果不是图片");
+                        const saved = String(await persistGenImage(dataUrl));
+                        if (saved.startsWith("data:image/") || /^https?:/i.test(saved)) throw new Error("上传没成功");
+                        if (replaceGalleryRef(msg, slot, url, saved)) {
+                            syncSwipeExtra(msg);
+                            persistChat("外链补存成本地文件");
+                            try { renderFloorImage(idx); } catch (e) {}
+                            log("外链迟到补存成功:", saved);
+                        } else {
+                            log("外链补存：聊天里的引用已不在（可能已重画），跳过");
+                        }
+                        lateSaves.delete(key);
+                    } catch (e) {
+                        log("外链补存第 " + (n + 1) + " 次失败:", e && e.message);
+                        attempt(n + 1);
+                    }
+                })();
+            }, delays[n]);
+        };
+        attempt(0);
+    }
     /* —— 生图统一请求（与 Tavo 生图工坊 v1.18.16 对齐） ——
        ① 主路径 chat/completions 多模态（尺寸 / 画质原样传）；地址直指 /images/generations 时跳过；
-       ② 兜底 images/generations（优先 url，400 拒绝 response_format 时去掉参数重试一次）；
+       ② 兜底 images/generations（优先 b64_json 拿数据直接存本地；站点 400 拒绝该参数才改要 url 重试一次）；
        ③ 尺寸全角 × 归一化为半角 x（fate 等站点拒收全角）；
        ④ genTimeout 超时与「停止」按钮真正能掐断；超时/取消后不再补发，避免重复计费；
        ⑤ 失败错误带 HTTP 状态码 + 站点返回的原话。
@@ -3156,16 +3228,17 @@
             if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
             let resp2 = await fetch(base + "/images/generations", {
                 method: "POST", headers: headers, signal: ctl.signal,
-                body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "url" })
+                body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "b64_json" })
             });
             let why2 = "";
             if (!resp2.ok) why2 = await resp2.text();
-            /* 优先外链；仅在 400 明确拒绝此参数时去掉参数重试一次，200 后绝不补发。 */
+            /* 先要图片数据：拿到数据就能直接上传存本地，不用下载、不受跨域影响。
+               站点明确 400 拒绝这个参数（肯定没计费）才改要 url 重试一次；200 后绝不补发。 */
             if (resp2.status === 400 && /response_format/i.test(why2)) {
-                log("站点不接受 response_format，省略此参数重试");
+                log("站点不接受 b64_json，改用 url 重试");
                 resp2 = await fetch(base + "/images/generations", {
                     method: "POST", headers: headers, signal: ctl.signal,
-                    body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined })
+                    body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "url" })
                 });
                 why2 = resp2.ok ? "" : await resp2.text();   /* body 只能读一次，重试后立刻读走 */
             }
@@ -4293,10 +4366,14 @@
             if (!chatSaved) {
                 setStatus("生图完成，但聊天保存失败；刷新前请先保存图片", C_WARN);
             } else if (/^https?:\/\//i.test(String(image))) {
-                /* 两条下载路都没通，只能把站点的外链写进去——这种链接多半有时效，必须说清 */
+                /* 两条下载路都没通，只能把站点的外链写进去——这种链接多半有时效，必须说清；
+                   同时排队后台补存：趁外链还有效重试"下载→上传"，成功就原地换成本地路径 */
                 log("只存了外链，没能存成本地文件：", lastImageDownloadError);
-                setStatus("生图完成，但只存了外链（下载被拦，可能过期）：" + lastImageDownloadError, C_WARN);
+                setStatus("生图完成，但只存了外链（下载被拦，可能过期；稍后会自动重试补存）：" + lastImageDownloadError, C_WARN);
                 toast("这张图只存了外链，可能会过期", null);
+                scheduleLateSave(idx, slot, String(image));
+            } else if (String(image).startsWith("data:image/")) {
+                setStatus("生图完成，但上传失败只存了内嵌数据（聊天文件会变大）", C_WARN);
             } else {
                 setStatus("生图完成，已存成本地文件（" + dur + "秒）", C_OK);
             }
