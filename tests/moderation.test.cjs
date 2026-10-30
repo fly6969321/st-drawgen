@@ -144,26 +144,28 @@ test('地址直指 images 且开了后端代理时仍按直连路径请求 image
     assert.match(calls[0].url, /\/images\/generations$/);
 });
 
-test('图片 URL 直接返回，不再下载或补发生成请求', async (t) => {
-    const { w, debug } = fixture(t, GPT);
+test('图片 URL：下载成图片数据返回，不再只透传外链', async (t) => {
+    const { w, debug, ctx } = fixture(t, GPT);
+    ctx.getRequestHeaders = () => ({ 'Content-Type': 'application/json', 'X-CSRF-Token': 't' });
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jNioAAAAASUVORK5CYII='), c => c.charCodeAt(0));
     const calls = [];
-    w.fetch = async (url, options) => {
+    w.fetch = async (url) => {
         calls.push(String(url));
         if (String(url).endsWith('/chat/completions')) {
             const body = JSON.stringify({ choices: [{ message: { content: '![](https://cdn.test/image.png)' } }] });
-            return {
-                ok: true, status: 200,
-                headers: { get: () => 'application/json' },
-                text: async () => body,
-            };
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => body };
         }
-        throw new Error('不应请求图片下载或上传');
+        if (String(url) === 'https://cdn.test/image.png') {
+            return { ok: true, status: 200, blob: async () => new w.Blob([png], { type: 'image/png' }) };
+        }
+        throw new Error('意外请求: ' + url);
     };
     globalThis.fetch = w.fetch;
     const { out, err } = await gen(debug);
-    assert.equal(out.image, 'https://cdn.test/image.png');
     assert.equal(err, '');
-    assert.equal(calls.length, 1, '只请求一次生图接口');
+    assert.match(out.image, /^data:image\/png;base64,/);
+    assert.equal(calls.length, 2, '生图一发 + 下载外链一发');
+    assert.ok(calls.includes('https://cdn.test/image.png'));
     assert.ok(!calls.some(url => url.endsWith('/images/generations')));
 });
 

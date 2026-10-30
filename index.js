@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.11
+ *  生图工坊 · DrawGen v1.8.12
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -26,8 +26,7 @@
  *      漏写闭合时不再把下一个标记吞掉（内层禁止再出现前缀）
  *    提速 —— 生图移出提取锁（之前下一楼提取要干等整张图生完，且生图失败会误触发提取重试）；
  *      提取请求封顶 max_tokens；正文上限 9000→4000 字；提取看门狗防锁死
- *    计费 —— chat 失败按原因决定是否退 images（限流/鉴权/5xx/已返回200 不再二连击）；
- *      锁脸编辑接口 200 无图就不再试下一种形状
+ *    计费 —— chat 失败按原因决定是否退 images（限流/鉴权/5xx/已返回200 不再二连击）
  *    其它 —— 延迟框清空不再退成 1800、图片宽度清空不再退成 60（归一化值回显到框里）；
  *      提取超时默认 180 秒（0=不限会锁死）；图片下载带超时与中止；「停止」能掐断并发的生图
  *    面板 —— 手机端整体变矮 60px；修「延迟 / 图片宽度」输入框不齐（格子底边对齐 + 长标签收短）
@@ -75,12 +74,16 @@
  *    重画按当前标记匹配分层记录；切回复或改正文后不写入旧提取结果、不继续批量生图。
  *  · v1.8.11 移除自动图片下载/上传及补存，不再把新图片 Base64 写进聊天。
  *    外链直接显示；接口只返回图片数据时仅临时预览下载。图库按回复去重，聊天保存串行。
+ *  · v1.8.12 回到 1.8.9 的图片落盘：生成好的图（外链先下载成图片数据）统一上传酒馆
+ *    服务器存成文件，聊天里只留本地路径 images/…；不再只认外链，也不再对 base64
+ *    只预览不落盘。保留 1.8.11 的聊天保存串行队列。同时移除「锁脸」（genEdits
+ *    四种形状重试 + 参考图）——它会让一次生图在站点后台出现最多四次调用。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.11";
+    const VERSION = "1.8.12";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -145,7 +148,6 @@
         anchorsJson: "", anchorsId: "",  // 角色锚点预设
         grokSize: "1024x1024",
         genQuality: "",            // 画质参数：GPT 2.5 系 low/medium/high/xhigh/max；Grok low/medium/auto；留空不发送（随站点档案保存）
-        faceRef: "", faceRefOn: false, faceRefMode: "chat",   // 脸部参考图（data URL）+ 锁脸开关 + 发送方式（chat=聊天多模态 / edits=/images/edits 编辑接口）
         genProxy: false,
         genTimeout: 300,
         imageKeepDays: 0,          // 默认长期保存；用户主动设置正数才按天清理，保留已有配置
@@ -2818,86 +2820,57 @@
             reader.readAsDataURL(blob);
         });
     }
-    /* —— 编辑接口：/images/edits（各站形状不一：new-api 只认 multipart、别家只认 JSON——四种形状全试，报错全汇总）—— */
-    async function genEdits(finalPrompt, faceRef) {
-        const c = cfg();
-        let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
-        if (!base) throw new Error("请先填写生图 API 地址");
-        if (/\/edits$/.test(base)) base = base.replace(/\/edits$/, "");
-        if (/\/generations$/.test(base)) base = base.replace(/\/generations$/, "");
-        if (/\/chat\/completions$/.test(base)) base = base.replace(/\/chat\/completions$/, "");
-        const url = base + "/images/edits";
-        const prompt = finalPrompt + "\n\n（输入图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）";
-        const rawB64 = String(faceRef).replace(/^data:[^,]+,/, "");
-        const size = normalizeGenSize(c.grokSize);
-        const quality = String(c.genQuality || "").trim();
-        const ctl = createGenController();
-        const signal = ctl.signal;
-        const errs = [];
-        async function parseResp(resp, tag) {
-            const text = await resp.text();
-            if (!resp.ok) throw new Error(tag + " " + siteErrorBrief(resp.status, text));
-            let result;
-            try { result = JSON.parse(text); } catch (e) { throw new Error(tag + " 响应不是 JSON: " + text.slice(0, 120)); }
-            const item = result && result.data && result.data[0];
-            /* 200 回来就意味着这一发已经计费了，解析不出图也不能再试下一种形状，
-               否则锁脸最坏四种形状各扣一次 */
-            if (!item) { const e = new Error(tag + " 响应缺少 data[0]: " + text.slice(0, 150)); e.sdgCharged = true; throw e; }
-            if (item.b64_json) return "data:image/png;base64," + item.b64_json;
-            if (item.url) return await normalizeImageResult(item.url, signal);
-            const e2 = new Error(tag + " 响应未包含图片"); e2.sdgCharged = true; throw e2;
+    async function dataUrlFromUrl(url, signal) {
+        /* 带上生图的 signal 和一个独立超时：站点返回 url 而 CDN 卡住时，整条生图会永久悬挂，
+           那一槽一直转圈、点「停止」也掐不断（它不接 abort）。 */
+        const resp = await fetchWithTimeout(url, { headers: directHeaders(), signal: signal }, 120000);
+        if (!resp.ok) throw new Error("下载图片失败: " + resp.status);
+        const blob = await resp.blob();
+        return await blobToDataURL(blob);
+    }
+    /* 外链先下载成图片数据；下载失败就退回原始 URL（宁可存一个可能过期的外链，也别让已经生好的图丢掉）。 */
+    async function normalizeImageToDataUrl(u, signal) {
+        if (!u) return "";
+        if (String(u).startsWith("data:image/")) return u;
+        try { return await dataUrlFromUrl(u, signal); }
+        catch (e) {
+            if (signal && signal.aborted) throw e;
+            log("下载失败，直接用 URL 兜底:", e.message); return u;
         }
-        function multipartBody(pngDataUrl, mime, filename) {
-            const bin = atob(pngDataUrl.split(",")[1]);
-            const buf = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-            const file = new File([buf], filename, { type: mime });
-            const fd = new FormData();
-            fd.append("model", c.genModel);
-            fd.append("prompt", prompt);
-            fd.append("image", file);
-            fd.append("n", "1");
-            fd.append("size", size);
-            if (quality) fd.append("quality", quality);
-            return fd;
-        }
-        const toPng = function (dataUrl) {
-            return new Promise(function (res) {
-                const im = new Image();
-                im.onload = function () {
-                    const cv = document.createElement("canvas");
-                    cv.width = im.width; cv.height = im.height;
-                    cv.getContext("2d").drawImage(im, 0, 0);
-                    res(cv.toDataURL("image/png"));
-                };
-                im.onerror = function () { res(dataUrl); };
-                im.src = dataUrl;
-            });
-        };
-        const pngRef = await toPng(faceRef);
-        const jsonExtra = quality ? { quality: quality } : {};
-        const attempts = [
-            ["multipart-PNG", { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: multipartBody(pngRef, "image/png", "face.png"), signal }],
-            ["multipart-JPEG", { method: "POST", headers: { "Authorization": "Bearer " + (c.genKey || "") }, body: multipartBody(faceRef, "image/jpeg", "face.jpg"), signal }],
-            ["JSON/dataURL", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify(Object.assign({ model: c.genModel, prompt: prompt, image: faceRef, n: 1, size: size }, jsonExtra)), signal }],
-            ["JSON/base64", { method: "POST", headers: directHeaders("application/json", "Bearer " + (c.genKey || "")), body: JSON.stringify(Object.assign({ model: c.genModel, prompt: prompt, image: rawB64, n: 1, size: size }, jsonExtra)), signal }]
-        ];
+    }
+    /* 把生成好的内嵌图上传到酒馆服务器存成文件，聊天里只留一个本地路径（images/…）。
+       不上传的话整张图的 base64 会写进聊天文件，几十次生图后聊天上百 MB、手机端直接 OOM。
+       上传失败就保留内嵌数据当兜底。 */
+    async function persistGenImage(imageUrl) {
+        let ctl = null;
         try {
-            for (let i = 0; i < attempts.length; i++) {
-                const tag = attempts[i][0];
-                try {
-                    return await parseResp(await fetch(url, attempts[i][1]), tag);
-                } catch (e) {
-                    const ae = genAbortError(ctl); if (ae) throw ae;
-                    errs.push("[" + tag + "] " + String(e.message || e).slice(0, 110));
-                    log("编辑接口形状 " + tag + " 失败:", String(e.message || e).slice(0, 200));
-                    if (e && e.sdgCharged) throw new Error("编辑接口已返回 200 但没给出图片，为免重复扣费没再试其它形状 → " + errs.join(" ｜ "));
-                }
-            }
-            throw new Error("编辑接口四种形状均失败 → " + errs.join(" ｜ "));
-        } finally {
-            ctl.dispose();
-        }
+            if (!String(imageUrl).startsWith("data:image/")) return imageUrl;
+            const cont = ctx();
+            if (!cont || typeof cont.getRequestHeaders !== "function") return imageUrl;
+            const s = String(imageUrl);
+            const meta = s.slice(0, s.indexOf(","));
+            const b64 = s.slice(s.indexOf(",") + 1);
+            const format = /image\/jpe?g/.test(meta) ? "jpeg" : (/image\/webp/.test(meta) ? "webp" : (/image\/gif/.test(meta) ? "gif" : "png"));
+            const chName = (cont.characterId !== undefined && cont.characters && cont.characters[cont.characterId]) ? String(cont.characters[cont.characterId].name || "") : "";
+            const filename = "sdg_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+            /* 生图接口已返回后仍在保存中；这段也要能被「停止」和生图超时掐断。 */
+            ctl = createGenController();
+            const res = await fetch("/api/images/upload", {
+                method: "POST",
+                headers: cont.getRequestHeaders(),
+                body: JSON.stringify({ image: b64, format: format, ch_name: chName, filename: filename }),
+                signal: ctl.signal
+            });
+            if (!res.ok) { log("图片上传服务器失败，保留内嵌存储:", res.status); return imageUrl; }
+            const j = await res.json();
+            if (j && j.path) { log("图片已存服务器:", j.path); return String(j.path).replace(/^\/+/, ""); }
+            log("上传响应缺少 path，保留内嵌存储");
+            return imageUrl;
+        } catch (e) {
+            const ae = ctl && genAbortError(ctl);
+            if (ae) throw ae;
+            log("图片上传异常，保留内嵌存储:", e && e.message); return imageUrl;
+        } finally { if (ctl) ctl.dispose(); }
     }
 
     /* —— 生图统一请求（与 Tavo 生图工坊 v1.18.16 对齐） ——
@@ -3039,7 +3012,6 @@
         const quality = String(c.genQuality || "").trim();       /* GPT 2.5 low~max；Grok low/medium/auto；留空不发送 */
         log("生图请求：", base.replace(/^https?:\/\//, ""), "model=" + c.genModel, "size=" + size, "q=" + (quality || "-"));
 
-        const faceRef = (c.faceRefOn && String(c.faceRef || "")) ? String(c.faceRef) : "";
         const ctl = createGenController();
 
         /* ① 主路径：chat/completions */
@@ -3054,12 +3026,7 @@
             canFallback = true;
         } else if (c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
             /* 酒馆后端代理通道：仅 chat，无 images 兜底；请求体保持后端约定原样 */
-            const parts = [];
-            if (faceRef) parts.push({ type: "image_url", image_url: { url: faceRef } });
-            parts.push({ type: "text", text: faceRef
-                ? finalPrompt + "\n\n（第一张图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）"
-                : finalPrompt });
-            const messages = [{ role: "user", content: parts }];
+            const messages = [{ role: "user", content: [{ type: "text", text: finalPrompt }] }];
             try {
                 const resp = await fetch("/api/backends/chat-completions/generate", {
                     method: "POST", headers: ctx().getRequestHeaders(), signal: ctl.signal,
@@ -3075,7 +3042,7 @@
                 if (resp.ok) {
                     const result = await readOpenAIResponse(resp);
                     const u = imgUrlFromChat(result);
-                    if (u) { const img = await normalizeImageResult(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "proxy" }; }
+                    if (u) { const img = await normalizeImageToDataUrl(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "proxy" }; }
                     lastErr = "代理 chat 接口响应中没有图片";
                 } else {
                     const t = await resp.text();
@@ -3088,21 +3055,16 @@
         } else try {
             const headers = { "Content-Type": "application/json", "Accept": "*/*" };
             if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
-            const parts = [];
-            if (faceRef) parts.push({ type: "image_url", image_url: { url: faceRef } });
-            parts.push({ type: "text", text: faceRef
-                ? finalPrompt + "\n\n（第一张图是人物面部参考：只把与参考图相貌对应的角色按参考脸生成，严格保持其脸部特征、发型与身份，不要改变长相或性别；其余角色严格按正文各自描述生成。）"
-                : finalPrompt });
             const resp = await fetch(base + "/chat/completions", {
                 method: "POST", headers: headers, signal: ctl.signal,
-                body: JSON.stringify({ model: c.genModel, messages: [{ role: "user", content: parts }], size: size, quality: quality || undefined })
+                body: JSON.stringify({ model: c.genModel, messages: [{ role: "user", content: [{ type: "text", text: finalPrompt }] }], size: size, quality: quality || undefined })
             });
             if (resp.ok) {
                 /* 200 可能已经计费；解析或读 body 失败也不能再请求 images 兜底。 */
                 charged = true;
                 const result = await readOpenAIResponse(resp);
                 const u = imgUrlFromChat(result);
-                if (u) { const img = await normalizeImageResult(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "chat" }; }
+                if (u) { const img = await normalizeImageToDataUrl(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "chat" }; }
                 lastErr = "chat 接口响应中没有图片";
             } else {
                 const t = await resp.text();
@@ -3150,7 +3112,7 @@
             if (resp2.ok) {
                 const result2 = await readOpenAIResponse(resp2);
                 const u2 = imgUrlFromGen(result2);
-                if (u2) { const img2 = await normalizeImageResult(u2, ctl.signal); ctl.dispose(); return { image: img2, prompt: finalPrompt, via: "generations" }; }
+                if (u2) { const img2 = await normalizeImageToDataUrl(u2, ctl.signal); ctl.dispose(); return { image: img2, prompt: finalPrompt, via: "generations" }; }
                 ctl.dispose();
                 throw new Error("images 接口响应未包含图片 / " + lastErr);
             }
@@ -3163,16 +3125,6 @@
         }
     }
 
-    /* 只校验返回值。外链直接显示，不下载、不上传、不制造内嵌聊天副本。 */
-    async function normalizeImageResult(value, signal) {
-        if (signal && signal.aborted) throw new DOMException("aborted", "AbortError");
-        if (!value) return "";
-        const image = String(value);
-        if (image.startsWith("data:image/")) return image;
-        const url = new URL(image, window.location.href);
-        if (!/^https?:$/.test(url.protocol)) throw new Error("不支持的图片地址");
-        return image;
-    }
     function visitImageRefs(chat, visit) {
         const extra = function (ex) {
             if (!ex || typeof ex !== "object") return;
@@ -3345,9 +3297,9 @@
         if (!finalPrompt) throw new Error("没有可用的生图提示词");
         log("生图最终提示词:", finalPrompt.slice(0, 200));
 
-        const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
-        const image = (faceRef && String(cfg().faceRefMode) === "edits") ? await genEdits(finalPrompt, faceRef) : (await genImageUnified(finalPrompt)).image;
-        return { image: image, prompt: finalPrompt, displayOnly: String(image).startsWith("data:image/") };
+        /* 拿到的图（外链先下载成图片数据）统一上传到酒馆服务器存成文件，聊天里只留本地路径。 */
+        const imageUrl = await persistGenImage((await genImageUnified(finalPrompt)).image);
+        return { image: imageUrl, prompt: finalPrompt };
     }
 
     /* ============================================================
@@ -4175,22 +4127,6 @@
             assertChatImageBudget(ctx().chat);
             const result = await generateImage(desc, layers);
             const image = result.image;
-            if (result.displayOnly) {
-                /* API 只给内嵌数据时仅在页面预览，不能让付费生成结果撑大服务器聊天。 */
-                openImagePreview(image);
-                const preview = q("#sdg-image-preview");
-                if (preview) {
-                    const download = document.createElement("a");
-                    download.textContent = "下载本次图片";
-                    download.href = image;
-                    download.download = "drawgen_" + Date.now() + (/^data:image\/jpe?g/i.test(image) ? ".jpg" : /^data:image\/webp/i.test(image) ? ".webp" : ".png");
-                    download.style.cssText = "position:absolute;top:12px;left:12px;z-index:5;padding:8px 12px;background:#222;color:#fff;border-radius:6px";
-                    preview.appendChild(download);
-                }
-                setStatus("本次接口只返回图片数据，未写入聊天；请下载后再关闭预览", C_WARN);
-                toast("图片仅临时预览，请点「下载本次图片」保存", null);
-                return image;
-            }
             let chatSaved = false;
             if (msg) {
                 /* 这楼还在不在？删楼后索引会整体左移，msg 可能已经被移出 chat，
@@ -4765,16 +4701,6 @@
                         '<option value="max"' + (cfg().genQuality === "max" ? " selected" : "") + '>max</option>' +
                         '<option value="auto"' + (cfg().genQuality === "auto" ? " selected" : "") + '>auto（Grok）</option>' +
                     '</select><div class="sdg-hint">GPT 2.5 系：low/medium/high/xhigh/max；Grok：low/medium/auto；随站点档案保存</div>') +
-                    field("脸部参考图", '<button type="button" id="sdg-face-pick" class="sdg-minibtn" style="width:100%;padding:8px 0;font-size:13px">📁 选择 / 更换参考图</button>' +
-                        '<input type="file" id="sdg-face-file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px">' +
-                        '<img id="sdg-face-thumb" alt=""' + (cfg().faceRef ? ' src="' + cfg().faceRef + '" style="display:block !important;height:110px !important;width:auto !important;max-width:100% !important;margin:5px 0 0 0 !important;border-radius:6px !important"' : ' style="display:none !important"') + '>' +
-                        '<button type="button" id="sdg-face-clear" class="sdg-minibtn" style="margin-top:5px' + (cfg().faceRef ? "" : ";display:none") + '">🗑 清除参考图</button>' +
-                        '<div class="sdg-hint" id="sdg-face-note">' + (cfg().faceRef ? '已存参考图 ✓ 勾选下方「锁脸」后生效' : '未设置（可选）：点上面按钮选一张正脸清晰的图') + '</div>') +
-                    chk("sdg-face-on", "faceRefOn", "锁脸：生成时附上参考图保持面部一致") +
-                    field("锁脸发送方式", '<select id="sdg-face-mode">' +
-                        '<option value="chat"' + (cfg().faceRefMode !== "edits" ? " selected" : "") + '>聊天多模态（默认，Gemini / GPT 系）</option>' +
-                        '<option value="edits"' + (cfg().faceRefMode === "edits" ? " selected" : "") + '>编辑接口（/images/edits，Grok 编辑模型等）</option>' +
-                    '</select>') +
                     chk("sdg-gen-proxy", "genProxy", "Gemini 走酒馆后端代理") +
 
                     '<h5>自动化</h5>' +
@@ -4790,7 +4716,6 @@
                         field("存图天数", textInput("sdg-keepdays", "imageKeepDays", "0", "number")) +
                     '</div>' +
                     '<div class="sdg-hint">生图超时或点「停止」不会补发。存图天数：0 = 长期保留；正数会删除超期的本地图片文件。已有设置继续生效。</div>' +
-                    '<div class="sdg-hint">图片只保留 API 外链，不再自动下载或上传。外链到期可能失效；接口只返回图片数据时请在预览中下载，不写入聊天。存图天数仅清理以前已保存的本地图片。</div>' +
 
                     '<h5>插件</h5>' +
                     chk("sdg-enabled", "enabled", "启用生图工坊") +
@@ -4936,44 +4861,6 @@
         /* 生图设置 */
         bindSite("gen");
         bindChk("#sdg-gen-proxy", "genProxy");
-        bindChk("#sdg-face-on", "faceRefOn");
-        const faceMode = q("#sdg-face-mode");
-        if (faceMode) faceMode.addEventListener("change", function () { save("faceRefMode", faceMode.value); });
-        const faceFile = q("#sdg-face-file");
-        const facePick = q("#sdg-face-pick");
-        if (facePick && faceFile) facePick.addEventListener("click", function () { faceFile.click(); });
-        if (faceFile) faceFile.addEventListener("change", function () {
-            const f = faceFile.files && faceFile.files[0];
-            if (!f) return;
-            const reader = new FileReader();
-            reader.onload = function () {
-                const img = new Image();
-                img.onload = function () {
-                    const maxDim = 768;
-                    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-                    const cv = document.createElement("canvas");
-                    cv.width = Math.round(img.width * scale);
-                    cv.height = Math.round(img.height * scale);
-                    cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
-                    const dataUrl = cv.toDataURL("image/jpeg", 0.85);
-                    save("faceRef", dataUrl);
-                    const th = q("#sdg-face-thumb"); if (th) { th.src = dataUrl; th.style.setProperty("display", "block", "important"); }
-                    const fc = q("#sdg-face-clear"); if (fc) fc.style.display = "";
-                    const note = q("#sdg-face-note"); if (note) note.textContent = "已存参考图 ✓（" + cv.width + "×" + cv.height + "）勾选下方「锁脸」后生效";
-                };
-                img.onerror = function () { setStatus("参考图读取失败", C_ERR); };
-                img.src = String(reader.result);
-            };
-            reader.readAsDataURL(f);
-        });
-        const faceClear = q("#sdg-face-clear");
-        if (faceClear) faceClear.addEventListener("click", function () {
-            save("faceRef", "");
-            if (faceFile) faceFile.value = "";
-            const th = q("#sdg-face-thumb"); if (th) { th.removeAttribute("src"); th.style.setProperty("display", "none", "important"); }
-            faceClear.style.display = "none";
-            const note = q("#sdg-face-note"); if (note) note.textContent = "未设置（可选）：点上面按钮选一张正脸清晰的图";
-        });
 
         /* 自动化 */
         bindChk("#sdg-auto-extract", "autoExtract");
@@ -5392,7 +5279,7 @@
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
             genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone,
             parseChatResponse, callSubAI, runExtract, onStop, persistChat, generateForFloor, onRegenFloor,
-            normalizeImageResult, generateImage
+            normalizeImageToDataUrl, persistGenImage, generateImage
         };
     }
 
