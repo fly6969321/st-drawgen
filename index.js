@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.13
+ *  生图工坊 · DrawGen v1.8.14
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -82,13 +82,16 @@
  *    只说明我们没拿到响应，站点可能已经生成并扣费 —— 不再自动改打 images 接口，
  *    直接报错并写清「未自动重试，要重试请自己点重画」。站点明确回 404/405/501/400
  *    的失败照旧允许唯一一次换接口兜底。「测试」按钮不再真实生图（原先点一下真扣费），
- *    改成只查站点可达性。生图代理勾选改名「走酒馆后端代理」（Grok/GPT/自定义站一样有效）。
+ *  · v1.8.14 修「楼层图裂、图库里却能看到」：早期离线修复脚本把内嵌图抽成文件时，
+ *    写进聊天的引用少了 user/ 前缀（images/DrawGenRecovered/… → 应是
+ *    user/images/DrawGenRecovered/…），楼层一直 404 图裂。插件现在会在打开聊天时
+ *    自动把这类旧引用纠正回来并落盘（只改这一个前缀）；脚本本身也已修正。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.13";
+    const VERSION = "1.8.14";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -3166,6 +3169,63 @@
         }
     }
 
+    /* ——— 旧引用纠正（图裂治愈） ———
+       早期的离线修复脚本把聊天里的内嵌图抽成了文件，但写进聊天的路径少了 user/ 前缀
+       （写成 images/DrawGenRecovered/…，文件实际在 user/images/DrawGenRecovered/…）。
+       结果：楼层里一直"图裂"（404），而酒馆图库里能看到、能下载。这里把这类引用
+       一次性纠正回正确路径（只改这一个前缀，别的一律不动），改完落盘、重绘。 */
+    const BAD_RECOVERED_PREFIX = "images/DrawGenRecovered/";
+    const FIXED_RECOVERED_PREFIX = "user/images/DrawGenRecovered/";
+    function healRecoveredUrl(u) {
+        const s = String(u == null ? "" : u);
+        return s.indexOf(BAD_RECOVERED_PREFIX) === 0 ? FIXED_RECOVERED_PREFIX + s.slice(BAD_RECOVERED_PREFIX.length) : u;
+    }
+    function healRecoveredRefs(msg) {
+        let changed = false;
+        const fixExtra = function (ex) {
+            if (!ex || typeof ex !== "object") return;
+            const gal = ex.sdg_gal;
+            if (gal && typeof gal === "object") {
+                Object.keys(gal).forEach(function (sk) {
+                    const sw = gal[sk];
+                    if (!sw || typeof sw !== "object") return;
+                    Object.keys(sw).forEach(function (slot) {
+                        const rec = sw[slot];
+                        if (!rec || !Array.isArray(rec.list)) return;
+                        for (let i = 0; i < rec.list.length; i++) {
+                            const fixed = healRecoveredUrl(rec.list[i]);
+                            if (fixed !== rec.list[i]) { rec.list[i] = fixed; changed = true; }
+                        }
+                    });
+                });
+            }
+            if (ex.sdg_images && typeof ex.sdg_images === "object") {
+                Object.keys(ex.sdg_images).forEach(function (k) {
+                    const fixed = healRecoveredUrl(ex.sdg_images[k]);
+                    if (fixed !== ex.sdg_images[k]) { ex.sdg_images[k] = fixed; changed = true; }
+                });
+            }
+            if (typeof ex.sdg_image === "string") {
+                const fixed = healRecoveredUrl(ex.sdg_image);
+                if (fixed !== ex.sdg_image) { ex.sdg_image = fixed; changed = true; }
+            }
+        };
+        if (msg && msg.extra) fixExtra(msg.extra);
+        if (msg && Array.isArray(msg.swipe_info)) msg.swipe_info.forEach(function (slot) { if (slot) fixExtra(slot.extra); });
+        return changed;
+    }
+    function healChatRecoveredRefs() {
+        try {
+            let any = false;
+            (ctx().chat || []).forEach(function (m) { if (m && healRecoveredRefs(m)) any = true; });
+            if (any) {
+                log("已把 DrawGenRecovered 旧引用纠正为 user/images/…，图裂会立刻恢复");
+                persistChat("修复旧图引用路径");
+                renderAllImages();
+            }
+        } catch (e) { log("旧引用纠正出错:", e && e.message); }
+    }
+
     /* ——— 旧图清理 ———
        生成的图存在酒馆服务器的 images 目录里（聊天只留路径），但删楼/删聊天/重画
        都不会删文件，磁盘会一直涨。这里按文件名里的时间戳清掉超期的图：
@@ -3360,7 +3420,8 @@
         const r = slotRec(msg, slot);
         if (!r) return "";
         const i = Math.min(Math.max(Number(r.cur) || 0, 0), r.list.length - 1);
-        return String(r.list[i] || "");
+        /* 显示时也顺手纠正：就算数据还没落盘修复，先把图正常显示出来 */
+        return healRecoveredUrl(String(r.list[i] || ""));
     }
     function getImageCount(msg, slot) { const r = slotRec(msg, slot); return r ? r.list.length : 0; }
     function getImageCur(msg, slot) { const r = slotRec(msg, slot); return r ? Math.min(Math.max(Number(r.cur) || 0, 0), r.list.length - 1) : 0; }
@@ -5232,13 +5293,13 @@
                     for (const k in tagsSeen) delete tagsSeen[k];
                     /* 分层框还是旧聊天的内容，不清会把旧场景沿用到新聊天 */
                     setLayerBoxes({});
-                    setTimeout(function () { renderAllImages(); installMesButtons(); }, 300);
+                    setTimeout(function () { healChatRecoveredRefs(); renderAllImages(); installMesButtons(); }, 300);
                     setTimeout(function () { cleanupOldImages(false); }, 4000);
                 });
             }
             if (c.event_types.APP_READY) {
                 c.eventSource.on(c.event_types.APP_READY, function () {
-                    setTimeout(function () { renderAllImages(); installMesButtons(); }, 500);
+                    setTimeout(function () { healChatRecoveredRefs(); renderAllImages(); installMesButtons(); }, 500);
                     setTimeout(function () { cleanupOldImages(false); }, 8000);
                 });
             }
@@ -5299,7 +5360,7 @@
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
-            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone,
+            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone, healRecoveredUrl, healChatRecoveredRefs,
             parseChatResponse, callSubAI, runExtract, onStop, persistChat, generateForFloor, onRegenFloor,
             normalizeImageToDataUrl, persistGenImage, generateImage
         };

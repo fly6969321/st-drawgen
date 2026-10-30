@@ -84,7 +84,7 @@ class Base64Image {
             if (existing && hashFile(existing.absolute) === digest) item = existing;
             else {
                 const filename = 'sdg_' + ctx.timestamp + '_' + digest + '.' + extension;
-                item = { relative: 'images/DrawGenRecovered/' + filename, filename, digest, staged: this.file };
+                item = { relative: 'user/images/DrawGenRecovered/' + filename, filename, digest, staged: this.file };
             }
             ctx.images.set(digest, item);
         }
@@ -359,7 +359,7 @@ function recoveredImages(root, userRoot) {
     if (fs.existsSync(directory)) for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
         const match = /^sdg_\d+_([a-f0-9]{64})\.(png|jpg|gif|webp|bmp)$/.exec(entry.name);
         if (entry.isFile() && !entry.isSymbolicLink() && match) existing.set(match[1], {
-            absolute: path.join(directory, entry.name), relative: 'images/DrawGenRecovered/' + entry.name, digest: match[1],
+            absolute: path.join(directory, entry.name), relative: 'user/images/DrawGenRecovered/' + entry.name, digest: match[1],
         });
     }
     return { directory, existing };

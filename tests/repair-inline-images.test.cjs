@@ -42,7 +42,7 @@ test('stream repair changes only plugin image tokens, preserving exact text, esc
     const files = listFiles(f.images);
     assert.equal(files.length, 1, 'identical decoded images share one recovered file');
     assert.deepEqual(fs.readFileSync(files[0]), Buffer.from(PNG64, 'base64'));
-    const relative = 'images/DrawGenRecovered/' + path.basename(files[0]);
+    const relative = 'user/images/DrawGenRecovered/' + path.basename(files[0]);
     const expected = template.replace(/\$[A-F]/g, JSON.stringify(relative));
     assert.equal(fs.readFileSync(f.file, 'utf8'), expected, 'all non-target bytes remain unchanged');
     assert.equal(fs.readFileSync(result.backup, 'utf8'), original);
@@ -143,7 +143,7 @@ test('escaped keys, base64 whitespace and token boundaries crossing read chunks 
     repair.repairFile(repair.createRun(f.root, STAMP), f.location(), info);
     const output = JSON.parse(fs.readFileSync(f.file, 'utf8'));
     assert.equal(output.padding, 'x'.repeat(65500));
-    assert.match(output.extra.sdg_images[0], /^images\/DrawGenRecovered\//);
+    assert.match(output.extra.sdg_images[0], /^user\/images\/DrawGenRecovered\//);
     assert.deepEqual(fs.readFileSync(listFiles(f.images)[0]), Buffer.from(PNG64, 'base64'));
 });
 
@@ -184,7 +184,7 @@ test('a JSONL record larger than a 64 MiB V8 heap is repaired in a constrained c
     const backups = listFiles(f.root).filter(file => file.includes('drawgen-repair-backup-') && file.endsWith('active.jsonl'));
     assert.equal(backups.length, 1);
     assert.equal(repair.hashFile(backups[0]), originalHash);
-    const recovered = path.join(f.root, 'data', 'default-user', 'user', output.extra.sdg_image);
+    const recovered = path.join(f.root, 'data', 'default-user', output.extra.sdg_image);
     assert.equal(fs.statSync(recovered).size, 9 + 90 * 1024 * 1024 * 3 / 4);
     assert.ok(fs.statSync(recovered).size > 64 * 1024 * 1024, 'the decoded file also exceeds the child heap limit');
 });

@@ -193,3 +193,18 @@ test('站点明确回 404（接口不存在、肯定没扣费）：仍允许唯�
     assert.match(f.calls[1].url, /images\/generations$/);
     assert.equal(result.image, DATA, '兜底拿到外链后下载成图片数据');
 });
+
+test('旧的 DrawGenRecovered 引用（少了 user/ 前缀）会被纠正，楼层图裂可恢复', async t => {
+    const f = fixture(t);
+    const BROKEN = 'images/DrawGenRecovered/sdg_1_abc.png';
+    const FIXED = 'user/images/DrawGenRecovered/sdg_1_abc.png';
+    f.debug.setImage(f.msg, 0, BROKEN);
+    f.msg.swipe_info[0].extra = JSON.parse(JSON.stringify(f.msg.extra));
+    assert.equal(f.debug.getImage(f.msg, 0), FIXED, '显示层先纠正（数据还没动）');
+    assert.equal(f.msg.extra.sdg_gal['0']['0'].list.at(-1), BROKEN);
+    f.debug.healChatRecoveredRefs();
+    assert.equal(f.msg.extra.sdg_gal['0']['0'].list.at(-1), FIXED, '数据纠正');
+    assert.equal(f.msg.swipe_info[0].extra.sdg_gal['0']['0'].list.at(-1), FIXED, 'swipe 快照同步纠正');
+    assert.equal(f.debug.healRecoveredUrl('images/other/x.png'), 'images/other/x.png', '只改这一个前缀，别的路径不碰');
+    assert.equal(f.debug.healRecoveredUrl('user/images/DrawGenRecovered/x.png'), 'user/images/DrawGenRecovered/x.png', '已正确的引用不重复处理');
+});
