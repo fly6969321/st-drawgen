@@ -171,3 +171,25 @@ test('参数错误反复 400 只重试一次；无关 400 不重试', async t =>
     await assert.rejects(g.finish(g.debug.genImageUnified('a cat')), /400/);
     assert.equal(g.calls.length, 1);
 });
+
+test('网络层失败（Failed to fetch）：不自动补发第二发，报错写明未重试', async t => {
+    const f = fixture(t);
+    const calls = [];
+    f.w.fetch = async url => { calls.push(String(url)); throw new TypeError('Failed to fetch'); };
+    globalThis.fetch = f.w.fetch;
+    await assert.rejects(f.debug.genImageUnified('a cat'), /未自动重试/);
+    assert.equal(calls.length, 1, '连接中断不代表站点没生成，再打一发就是重复扣费');
+    assert.match(calls[0], /\/chat\/completions$/);
+});
+
+test('站点明确回 404（接口不存在、肯定没扣费）：仍允许唯一一次换 images 兜底', async t => {
+    const f = fixture(t);
+    f.respond(call => /chat\/completions/.test(call.url)
+        ? f.response('not found', 404)
+        : f.response({ data: [{ url: SIGNED }] }));
+    const result = await f.finish(f.debug.genImageUnified('a cat'));
+    assert.equal(f.calls.length, 2, 'chat 一发 + images 一发，共两发');
+    assert.match(f.calls[0].url, /chat\/completions$/);
+    assert.match(f.calls[1].url, /images\/generations$/);
+    assert.equal(result.image, DATA, '兜底拿到外链后下载成图片数据');
+});

@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.12
+ *  生图工坊 · DrawGen v1.8.13
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -78,12 +78,17 @@
  *    服务器存成文件，聊天里只留本地路径 images/…；不再只认外链，也不再对 base64
  *    只预览不落盘。保留 1.8.11 的聊天保存串行队列。同时移除「锁脸」（genEdits
  *    四种形状重试 + 参考图）——它会让一次生图在站点后台出现最多四次调用。
+ *  · v1.8.13 生图失败不再自动补发：网络层失败（浏览器报 Failed to fetch / 连接被掐）
+ *    只说明我们没拿到响应，站点可能已经生成并扣费 —— 不再自动改打 images 接口，
+ *    直接报错并写清「未自动重试，要重试请自己点重画」。站点明确回 404/405/501/400
+ *    的失败照旧允许唯一一次换接口兜底。「测试」按钮不再真实生图（原先点一下真扣费），
+ *    改成只查站点可达性。生图代理勾选改名「走酒馆后端代理」（Grok/GPT/自定义站一样有效）。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.12";
+    const VERSION = "1.8.13";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -3020,7 +3025,7 @@
            参数不被接受(400)、网络层错误。鉴权(401/403)、限流(429)、服务端错(5xx)一律不退——
            退了也是再吃一次同样的错，还白添一次请求；200 但解析不出图更是已经计费了，
            再发一次等于同一张图扣两回。内容被审核拒的 400 同理（见 isModerationBlock）。 */
-        let canFallback = false, charged = false, moderated = false;
+        let canFallback = false, charged = false, moderated = false, netErr = false;
         if (imagesOnly) {
             lastErr = "按地址直连 images 接口";
             canFallback = true;
@@ -3075,7 +3080,11 @@
         } catch (e) {
             const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
             lastErr = "chat 接口网络错误: " + (e && e.message || e);
-            canFallback = !charged;
+            /* 网络层失败（浏览器报 Failed to fetch / 连接被掐）只说明「我们没拿到响应」，
+               不等于站点没执行——请求很可能已经到达站点并扣了费。这里绝不自动补发，
+               免得同一张图被扣两回；要不要重试交给她自己决定。 */
+            netErr = true;
+            canFallback = false;
         }
 
         /* ② 兜底：images/generations（后端代理通道没有这一兜底） */
@@ -3089,7 +3098,9 @@
                 ? "（站点已返回 200，可能已计费，没有再试 images 接口以免重复扣费）"
                 : moderated
                     ? "（内容被站点审核拒了，没再试 images 接口：同一个提示词退过去也是一样被拒）"
-                    : "（没再试 images 接口：这类错误退了也是同样结果）"));
+                    : netErr
+                        ? "（连接中断不代表站点没生成：可能已扣费，未自动重试；要重试请自己点重画）"
+                        : "（没再试 images 接口：这类错误退了也是同样结果）"));
         }
         try {
             const headers = { "Content-Type": "application/json", "Accept": "*/*" };
@@ -4701,7 +4712,7 @@
                         '<option value="max"' + (cfg().genQuality === "max" ? " selected" : "") + '>max</option>' +
                         '<option value="auto"' + (cfg().genQuality === "auto" ? " selected" : "") + '>auto（Grok）</option>' +
                     '</select><div class="sdg-hint">GPT 2.5 系：low/medium/high/xhigh/max；Grok：low/medium/auto；随站点档案保存</div>') +
-                    chk("sdg-gen-proxy", "genProxy", "Gemini 走酒馆后端代理") +
+                    chk("sdg-gen-proxy", "genProxy", "走酒馆后端代理（绕跨域）") +
 
                     '<h5>自动化</h5>' +
                     chk("sdg-auto-extract", "autoExtract", "收到回复后自动提取") +
@@ -5087,11 +5098,22 @@
         const c = cfg();
         try {
             if (!c.genEndpoint) throw new Error("请先填写生图 API 地址");
-            setStatus("测试生图（会真实生成一张图）…", C_OK);
-            await generateImage("a simple red apple on a white table");
-            setStatus("生图连接成功 ✓（已成功生成一张测试图）", C_OK);
+            if (!c.genModel) throw new Error("请先填写生图模型");
+            if (c.genProxy) {
+                /* 走酒馆后端代理时浏览器这边本来就没法直连，不真生图、只回报配置已填 */
+                setStatus("站点配置已填写（走酒馆后端代理，未真实生图；要验证连通请生成一张）", C_OK);
+                return;
+            }
+            setStatus("正在检查生图站点连通性（不会生成图片，不扣费）…", C_OK);
+            const base = String(c.genEndpoint || "").trim().replace(/\/+$/, "").replace(/\/(images\/generations|chat\/completions)$/, "");
+            const headers = { "Accept": "*/*" };
+            if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
+            /* 只要能拿到 HTTP 应答（哪怕是 401/404）就说明地址和网络通；
+               只有连不上（网络层错误）才报失败。不发任何生图请求。 */
+            await fetchWithTimeout(base + "/models", { headers: headers }, 30000);
+            setStatus("连接成功 ✓（站点可达；未生成图片，不扣费）", C_OK);
         } catch (e) {
-            setStatus("生图连接失败：" + formatGenError(e), C_ERR);
+            setStatus("生图连接失败：" + (e && e.message || e), C_ERR);
         }
     }
 
