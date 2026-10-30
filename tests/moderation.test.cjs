@@ -144,7 +144,7 @@ test('地址直指 images 且开了后端代理时仍按直连路径请求 image
     assert.match(calls[0].url, /\/images\/generations$/);
 });
 
-test('停止图片 URL 下载会向上传递取消，不把未下载 URL 当作成功图片', async (t) => {
+test('图片 URL 直接返回，不再下载或补发生成请求', async (t) => {
     const { w, debug } = fixture(t, GPT);
     const calls = [];
     w.fetch = async (url, options) => {
@@ -157,14 +157,13 @@ test('停止图片 URL 下载会向上传递取消，不把未下载 URL 当作�
                 text: async () => body,
             };
         }
-        debug.onStop();
-        throw new w.DOMException('aborted', 'AbortError');
+        throw new Error('不应请求图片下载或上传');
     };
     globalThis.fetch = w.fetch;
     const { out, err } = await gen(debug);
-    assert.equal(out, null);
-    assert.match(err, /已取消生图/);
-    assert.equal(calls.length, 2, '不能继续请求 images 兜底');
+    assert.equal(out.image, 'https://cdn.test/image.png');
+    assert.equal(err, '');
+    assert.equal(calls.length, 1, '只请求一次生图接口');
     assert.ok(!calls.some(url => url.endsWith('/images/generations')));
 });
 

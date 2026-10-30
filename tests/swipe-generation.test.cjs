@@ -7,7 +7,7 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 // An optional saved source lets the same behavioral tests demonstrate the old bug.
 const source = fs.readFileSync(process.env.SDG_TEST_SOURCE || path.join(__dirname, '..', 'index.js'), 'utf8')
     .replace('window.__sdgDebug = {', 'window.__sdgDebug = { generateForFloor, onRegenFloor,');
-const IMAGE = 'data:image/png;base64,AAAA';
+const IMAGE = 'https://cdn.test/generated.png?signature=swipe-test';
 const clone = value => JSON.parse(JSON.stringify(value));
 const tag = desc => 'image###' + desc + '###';
 const gallery = images => ({ list: images, cur: images.length - 1 });
@@ -123,7 +123,8 @@ test('third reply redraw keeps both reply records and all original image history
     assert.equal(msg.extra.sdg_desc, 'second-scene', 'completion must not alter the currently displayed reply record');
     assert.deepEqual(clone(msg.swipe_info[1].extra), secondBefore, 'the second reply snapshot is unchanged');
     assert.deepEqual(clone(msg.swipe_info[2].extra.sdg_gal['2']['0'].list), ['old-third-A', 'old-third-B', IMAGE]);
-    assert.deepEqual(clone(msg.swipe_info[2].extra.sdg_gal['0']['0'].list), ['old-first']);
+    assert.equal(msg.swipe_info[2].extra.sdg_gal['0'], undefined, 'other replies are no longer duplicated in every snapshot');
+    assert.deepEqual(clone(msg.swipe_info[0].extra.sdg_gal['0']['0'].list), ['old-first']);
     assert.deepEqual(clone(msg.extra.sdg_gal['1']['0'].list), ['old-second']);
 
     f.select(2);

@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.10
+ *  生图工坊 · DrawGen v1.8.11
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -73,14 +73,14 @@
  *    旧图清理同步处理所有 swipe 快照，编辑中的临时正文不触发清图；看门狗解锁后旧提取结果失效。
  *  · v1.8.9 图片与工具栏等宽，竖图不再因限高缩窄；异步生图只更新原回复图库，
  *    重画按当前标记匹配分层记录；切回复或改正文后不写入旧提取结果、不继续批量生图。
- *  · v1.8.10 远端图下载失败尝试酒馆代理，真实图片字节保存到酒馆；未存下的外链明确提示，
- *    可重试保存或补存当前聊天所有回复旧图。新安装默认长期保留，已有保留天数不改。
+ *  · v1.8.11 移除自动图片下载/上传及补存，不再把新图片 Base64 写进聊天。
+ *    外链直接显示；接口只返回图片数据时仅临时预览下载。图库按回复去重，聊天保存串行。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.10";
+    const VERSION = "1.8.11";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -148,7 +148,6 @@
         faceRef: "", faceRefOn: false, faceRefMode: "chat",   // 脸部参考图（data URL）+ 锁脸开关 + 发送方式（chat=聊天多模态 / edits=/images/edits 编辑接口）
         genProxy: false,
         genTimeout: 300,
-        convertToJpeg: false,
         imageKeepDays: 0,          // 默认长期保存；用户主动设置正数才按天清理，保留已有配置
         imageCleanAt: 0,           // 上次清理时间，半天跑一次就够
         showImage: true,
@@ -2111,16 +2110,99 @@
         if (!slot.extra || typeof slot.extra !== "object") { if (!make) return null; slot.extra = {}; }
         return slot;
     }
+    /* 老版本把整份图库写进每条 swipe，JSON 保存时同一张内嵌图会重复 S+1 次。
+       先把旧副本中独有的历史归还所属 swipe，再让每份快照只留自身分组。
+       无法归属的旧分组保留原处；同步目标以当前值为准，缺失代表显式清图，不能复活。 */
+    function compactSwipeGalleries(msg, authoritativeKey) {
+        if (!msg || !Array.isArray(msg.swipe_info)) return false;
+        const isGallery = value => value && typeof value === "object" && !Array.isArray(value);
+        const main = msg.extra && isGallery(msg.extra.sdg_gal) ? msg.extra.sdg_gal : null;
+        const ownerOf = key => /^(0|[1-9]\d*)$/.test(key) && Number(key) < msg.swipe_info.length ? Number(key) : -1;
+        const sources = new Map(), snapshots = [], seenExtras = new Set();
+        let changed = false;
+        msg.swipe_info.forEach(function (slot, i) {
+            if (!slot || !isGallery(slot.extra)) return;
+            if (slot.extra === msg.extra || seenExtras.has(slot.extra)) {
+                slot.extra = Object.assign({}, slot.extra);
+                changed = true;
+            }
+            seenExtras.add(slot.extra);
+            if (isGallery(slot.extra.sdg_gal)) snapshots.push({ i: i, extra: slot.extra, gal: slot.extra.sdg_gal });
+        });
+        const collect = function (gal) {
+            if (!gal) return;
+            Object.keys(gal).forEach(function (key) {
+                if (ownerOf(key) < 0 || !isGallery(gal[key])) return;
+                if (!sources.has(key)) sources.set(key, []);
+                const groups = sources.get(key);
+                if (groups.indexOf(gal[key]) < 0) groups.push(gal[key]);
+            });
+        };
+        collect(main);
+        snapshots.forEach(snapshot => collect(snapshot.gal));
+        const canonical = new Map();
+        sources.forEach(function (groups, key) {
+            if (main && authoritativeKey != null && key === String(authoritativeKey)) {
+                if (main && isGallery(main[key])) canonical.set(key, main[key]);
+                return;
+            }
+            const owner = swipeInfoSlot(msg, false, key);
+            let group = owner && owner.extra.sdg_gal && owner.extra.sdg_gal[key];
+            if (!isGallery(group)) group = groups[0];
+            groups.forEach(function (add) {
+                if (add === group) return;
+                Object.keys(add).forEach(function (slot) {
+                    const old = group[slot], incoming = add[slot];
+                    if (!old) { group = Object.assign({}, group, { [slot]: incoming }); return; }
+                    if (!incoming || !Array.isArray(incoming.list) || !Array.isArray(old.list)) return;
+                    const seen = new Set(old.list), missing = incoming.list.filter(function (url) {
+                        if (seen.has(url)) return false;
+                        seen.add(url); return true;
+                    });
+                    if (!missing.length) return;
+                    /* 保留首选快照的顺序和正在查看的图片，旧副本独有的历史补在前面。 */
+                    const cur = Math.min(Math.max(Number(old.cur) || 0, 0), Math.max(0, old.list.length - 1));
+                    group = Object.assign({}, group, { [slot]: Object.assign({}, old, {
+                        list: missing.concat(old.list), cur: cur + missing.length
+                    }) });
+                });
+            });
+            canonical.set(key, group);
+        });
+        /* 当前 extra 只更新它已有的分组，不为显示一条回复重新装载所有历史。 */
+        if (main) canonical.forEach(function (group, key) {
+            if (Object.prototype.hasOwnProperty.call(main, key) && main[key] !== group) { main[key] = group; changed = true; }
+        });
+        canonical.forEach(function (_group, key) {
+            const slot = swipeInfoSlot(msg, true, key);
+            if (slot && !snapshots.some(snapshot => snapshot.i === Number(key))) snapshots.push({ i: Number(key), extra: slot.extra, gal: {} });
+        });
+        snapshots.forEach(function (snapshot) {
+            const own = String(snapshot.i), next = Object.create(null);
+            Object.keys(snapshot.gal).forEach(function (key) {
+                if (ownerOf(key) < 0 || !isGallery(snapshot.gal[key])) next[key] = snapshot.gal[key];
+            });
+            if (canonical.has(own)) next[own] = canonical.get(own);
+            const keys = Object.keys(next), prevKeys = Object.keys(snapshot.gal);
+            if (snapshot.gal === main || keys.length !== prevKeys.length || keys.some(key => snapshot.gal[key] !== next[key])) {
+                snapshot.extra.sdg_gal = next;
+                changed = true;
+            }
+        });
+        return changed;
+    }
     function syncSwipeExtra(msg) { syncSwipeExtraFor(msg, null); }
     function syncSwipeExtraFor(msg, forceId) {
         try {
+            const sk = forceId != null ? String(forceId) : swipeKey(msg);
+            compactSwipeGalleries(msg, sk);
             const slot = swipeInfoSlot(msg, true, forceId);
             if (!slot) return;
             const ex = (msg && msg.extra) || {};
             /* 异步生图回来时可能已切回复：只同步目标回复的图库，不能把当前回复
                的描述/分层记录覆盖到它身上，其他回复的图库快照也原样保留。 */
             if (forceId != null && String(forceId) !== swipeKey(msg)) {
-                const sk = String(forceId), gal = ex.sdg_gal;
+                const gal = ex.sdg_gal;
                 if (gal && gal[sk]) {
                     if (!slot.extra.sdg_gal || typeof slot.extra.sdg_gal !== "object") slot.extra.sdg_gal = {};
                     slot.extra.sdg_gal[sk] = gal[sk];
@@ -2128,6 +2210,7 @@
                 return;
             }
             SDG_EXTRA_KEYS.forEach(function (k) {
+                if (k === "sdg_gal") return; // compactSwipeGalleries 已按回复同步，不能再整份覆盖。
                 if (ex[k] === undefined) delete slot.extra[k];
                 else slot.extra[k] = ex[k];
             });
@@ -2137,11 +2220,11 @@
        图库按 swipe 分键，两边合并，免得在别的 swipe 生的图被旧快照挤掉 */
     function restoreSwipeExtra(msg) {
         try {
+            let changed = compactSwipeGalleries(msg);
             const slot = swipeInfoSlot(msg, false);
             const src = slot && slot.extra;
-            if (!src) return false;
+            if (!src) return changed;
             if (!msg.extra || typeof msg.extra !== "object") msg.extra = {};
-            let changed = false;
             SDG_EXTRA_KEYS.forEach(function (k) {
                 if (src[k] === undefined) return;
                 if (k === "sdg_gal" && msg.extra.sdg_gal && typeof msg.extra.sdg_gal === "object") {
@@ -2154,46 +2237,79 @@
                     }
                     return;
                 }
+                if (k === "sdg_gal") { msg.extra[k] = Object.assign({}, src[k]); changed = true; return; }
                 if (msg.extra[k] === undefined) { msg.extra[k] = src[k]; changed = true; }
             });
             return changed;
         } catch (e) { return false; }
     }
 
-    /* 落盘：酒馆的 saveChat 是 async，之前到处裸调且空 catch，失败和竞态都看不见。
-       统一走这里：同一帧内多次改动只落一次，失败明确提示（图/注入丢了得让她知道）。 */
-    let chatSaveTimer = null, chatSaveWaiters = [];
+    /* 落盘：40ms 合并改动；前一份聊天保存完成后才发送下一份，避免并发序列化大聊天。
+       排队时切走的聊天不交给当前聊天的 saveChat；失败会释放队列并明确提示。 */
+    let chatSaveTimer = null, chatSaveWaiters = [], chatSaveRunning = false, chatSaveReady = false;
+    function chatSaveTarget(c) {
+        return { chat: c.chat, characterId: c.characterId, groupId: c.groupId,
+            id: typeof c.getCurrentChatId === "function" ? c.getCurrentChatId() : undefined };
+    }
+    function chatSaveTargetMatches(target, c) {
+        if (!c || c.chat !== target.chat || c.characterId !== target.characterId || c.groupId !== target.groupId) return false;
+        return target.id === undefined || (typeof c.getCurrentChatId === "function" && c.getCurrentChatId() === target.id);
+    }
+    function drainChatSaves() {
+        if (chatSaveRunning || !chatSaveReady) return;
+        chatSaveReady = false;
+        const pending = chatSaveWaiters; chatSaveWaiters = [];
+        let c;
+        try { c = ctx(); } catch (e) {}
+        const valid = function (w) {
+            try {
+                if (c && typeof c.saveChat === "function" && chatSaveTargetMatches(w.target, c) && (!w.stillValid || w.stillValid())) return true;
+            } catch (e) { /* 失效检查出错也不能挂住其它保存请求。 */ }
+            w.resolve(false); return false;
+        };
+        let waiters = pending.filter(valid);
+        if (!waiters.length) return;
+        chatSaveRunning = true;
+        const saveWhy = waiters[waiters.length - 1].why;
+        const finish = function (ok, error) {
+            if (ok && waiters.length) log("已落盘 ×" + waiters.length + " (" + saveWhy + ")");
+            else if (!ok) {
+                log("落盘失败(" + saveWhy + "):", error && error.message || error);
+                toast("落盘失败，刷新前这些改动可能丢：" + (error && error.message || error), false);
+            }
+            chatSaveRunning = false;
+            waiters.forEach(function (w) { w.resolve(ok); });
+            drainChatSaves();
+        };
+        let result;
+        try {
+            result = Promise.resolve().then(function () {
+                /* 异步执行前再次检查，不能保存刚切换过来的另一份聊天。 */
+                try { c = ctx(); } catch (e) { c = null; }
+                waiters = waiters.filter(valid);
+                if (!waiters.length) return;
+                assertChatImageBudget(c.chat);
+                return c.saveChat();
+            });
+        }
+        catch (e) { finish(false, e); return; }
+        Promise.resolve(result).then(function () { finish(true); }, function (e) { finish(false, e); });
+    }
     function persistChat(why, stillValid) {
-        const c = ctx();
-        if (!c || typeof c.saveChat !== "function") return Promise.resolve(false);
+        let target;
+        try {
+            const c = ctx();
+            if (!c || typeof c.saveChat !== "function") return Promise.resolve(false);
+            target = chatSaveTarget(c);
+        } catch (e) { return Promise.resolve(false); }
         if (chatSaveTimer) clearTimeout(chatSaveTimer);
+        chatSaveReady = false;
         return new Promise(function (resolve) {
-            chatSaveWaiters.push({ resolve: resolve, why: why || "", stillValid: stillValid });
+            chatSaveWaiters.push({ resolve: resolve, why: why || "", stillValid: stillValid, target: target });
             chatSaveTimer = setTimeout(function () {
                 chatSaveTimer = null;
-                const pending = chatSaveWaiters; chatSaveWaiters = [];
-                const waiters = pending.filter(function (w) {
-                    if (!w.stillValid || w.stillValid()) return true;
-                    w.resolve(false); return false;
-                });
-                if (!waiters.length) return;
-                const n = waiters.length;
-                const saveWhy = waiters.length ? waiters[waiters.length - 1].why : (why || "");
-                const finish = function (ok) { waiters.forEach(function (w) { w.resolve(ok); }); };
-                let r;
-                try { r = c.saveChat(); } catch (e) {
-                    log("落盘失败(" + saveWhy + "):", e && e.message || e);
-                    toast("落盘失败，刷新前这些改动可能丢：" + (e && e.message || e), false);
-                    return finish(false);
-                }
-                if (r && typeof r.then === "function") {
-                    r.then(function () { log("已落盘 ×" + n + " (" + saveWhy + ")"); finish(true); },
-                           function (e) {
-                               log("落盘失败(" + saveWhy + "):", e && e.message || e);
-                               toast("落盘失败，刷新前这些改动可能丢：" + (e && e.message || e), false);
-                               finish(false);
-                           });
-                } else finish(true);
+                chatSaveReady = true;
+                drainChatSaves();
             }, 40);
         });
     }
@@ -2702,58 +2818,6 @@
             reader.readAsDataURL(blob);
         });
     }
-    async function dataUrlFromUrl(url, signal, proxy) {
-        /* 带上生图的 signal 和一个独立超时：这一步之前裸 fetch，站点返回 url 而 CDN 卡住时
-           整条生图永久悬挂，那一槽一直转圈，点「停止」也掐不断（它不接 abort） */
-        const headers = { Accept: "image/*" };
-        /* 代理会把部分请求头转发给图片站，只允许 CSRF 头；绝不传 API 密钥或登录凭据。 */
-        if (proxy && ctx() && typeof ctx().getRequestHeaders === "function") {
-            const local = ctx().getRequestHeaders();
-            Object.keys(local || {}).forEach(function (key) { if (key.toLowerCase() === "x-csrf-token") headers[key] = local[key]; });
-        }
-        const resp = await fetchWithTimeout(proxy ? "/proxy/" + encodeURIComponent(url) : url,
-            { headers: headers, signal: signal, credentials: proxy ? "same-origin" : "omit" }, 120000);
-        if (!resp.ok) throw new Error("下载图片失败: " + resp.status);
-        const blob = await resp.blob();
-        const head = await new Promise(function (resolve, reject) {
-            const reader = new FileReader();
-            reader.onload = () => resolve(new Uint8Array(reader.result));
-            reader.onerror = () => reject(new Error("读取图片失败"));
-            reader.readAsArrayBuffer(blob.slice(0, 16));
-        });
-        const ascii = (start, end) => String.fromCharCode.apply(null, head.slice(start, end));
-        const mime = head.length >= 8 && head[0] === 137 && ascii(1, 4) === "PNG" && head[4] === 13 && head[5] === 10 && head[6] === 26 && head[7] === 10 ? "image/png"
-            : head.length >= 3 && head[0] === 255 && head[1] === 216 && head[2] === 255 ? "image/jpeg"
-            : /^GIF8[79]a$/.test(ascii(0, 6)) ? "image/gif"
-            : ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP" ? "image/webp"
-            : ascii(0, 2) === "BM" ? "image/bmp" : "";
-        if (!mime) throw new Error("下载内容不是有效的图片，可能是过期链接或站点错误页面");
-        if (signal && signal.aborted) throw new DOMException("aborted", "AbortError");
-        const data = await blobToDataURL(new Blob([blob], { type: mime }));
-        if (signal && signal.aborted) throw new DOMException("aborted", "AbortError");
-        return data;
-    }
-
-    async function convertImageToJpeg(input) {
-        const img = await new Promise((resolve, reject) => {
-            const im = new Image();
-            im.onload = () => resolve(im);
-            im.onerror = () => reject(new Error("图片加载失败"));
-            im.src = input;
-        });
-        const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
-        if (typeof OffscreenCanvas !== "undefined") {
-            const canvas = new OffscreenCanvas(w, h);
-            canvas.getContext("2d").drawImage(img, 0, 0);
-            const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 });
-            return blobToDataURL(blob);
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = w; canvas.height = h;
-        canvas.getContext("2d").drawImage(img, 0, 0);
-        return canvas.toDataURL("image/jpeg", 0.95);
-    }
-
     /* —— 编辑接口：/images/edits（各站形状不一：new-api 只认 multipart、别家只认 JSON——四种形状全试，报错全汇总）—— */
     async function genEdits(finalPrompt, faceRef) {
         const c = cfg();
@@ -2780,7 +2844,7 @@
                否则锁脸最坏四种形状各扣一次 */
             if (!item) { const e = new Error(tag + " 响应缺少 data[0]: " + text.slice(0, 150)); e.sdgCharged = true; throw e; }
             if (item.b64_json) return "data:image/png;base64," + item.b64_json;
-            if (item.url) return await normalizeImageToDataUrl(item.url, signal);
+            if (item.url) return await normalizeImageResult(item.url, signal);
             const e2 = new Error(tag + " 响应未包含图片"); e2.sdgCharged = true; throw e2;
         }
         function multipartBody(pngDataUrl, mime, filename) {
@@ -2825,7 +2889,6 @@
                     return await parseResp(await fetch(url, attempts[i][1]), tag);
                 } catch (e) {
                     const ae = genAbortError(ctl); if (ae) throw ae;
-                    if (e && e.sdgImageDownload) throw e;
                     errs.push("[" + tag + "] " + String(e.message || e).slice(0, 110));
                     log("编辑接口形状 " + tag + " 失败:", String(e.message || e).slice(0, 200));
                     if (e && e.sdgCharged) throw new Error("编辑接口已返回 200 但没给出图片，为免重复扣费没再试其它形状 → " + errs.join(" ｜ "));
@@ -2839,7 +2902,7 @@
 
     /* —— 生图统一请求（与 Tavo 生图工坊 v1.18.16 对齐） ——
        ① 主路径 chat/completions 多模态（尺寸 / 画质原样传）；地址直指 /images/generations 时跳过；
-       ② 兜底 images/generations（b64_json，站点只认 url 即 400 提 response_format 时自动改发 url 重试一次）；
+       ② 兜底 images/generations（优先 url，400 拒绝 response_format 时去掉参数重试一次）；
        ③ 尺寸全角 × 归一化为半角 x（fate 等站点拒收全角）；
        ④ genTimeout 超时与「停止」按钮真正能掐断；超时/取消后不再补发，避免重复计费；
        ⑤ 失败错误带 HTTP 状态码 + 站点返回的原话。
@@ -3012,7 +3075,7 @@
                 if (resp.ok) {
                     const result = await readOpenAIResponse(resp);
                     const u = imgUrlFromChat(result);
-                    if (u) { const img = await normalizeImageToDataUrl(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "proxy" }; }
+                    if (u) { const img = await normalizeImageResult(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "proxy" }; }
                     lastErr = "代理 chat 接口响应中没有图片";
                 } else {
                     const t = await resp.text();
@@ -3020,7 +3083,6 @@
                 }
             } catch (e) {
                 const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
-                if (e && e.sdgImageDownload) { ctl.dispose(); throw e; }
                 lastErr = "代理 chat 接口网络错误: " + (e && e.message || e);
             }
         } else try {
@@ -3040,7 +3102,7 @@
                 charged = true;
                 const result = await readOpenAIResponse(resp);
                 const u = imgUrlFromChat(result);
-                if (u) { const img = await normalizeImageToDataUrl(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "chat" }; }
+                if (u) { const img = await normalizeImageResult(u, ctl.signal); ctl.dispose(); return { image: img, prompt: finalPrompt, via: "chat" }; }
                 lastErr = "chat 接口响应中没有图片";
             } else {
                 const t = await resp.text();
@@ -3050,7 +3112,6 @@
             }
         } catch (e) {
             const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
-            if (e && e.sdgImageDownload) { ctl.dispose(); throw e; }
             lastErr = "chat 接口网络错误: " + (e && e.message || e);
             canFallback = !charged;
         }
@@ -3073,23 +3134,23 @@
             if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
             let resp2 = await fetch(base + "/images/generations", {
                 method: "POST", headers: headers, signal: ctl.signal,
-                body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "b64_json" })
+                body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "url" })
             });
             let why2 = "";
             if (!resp2.ok) why2 = await resp2.text();
-            /* fate 类站点：b64_json 一律 400「仅支持 url」（未计费）→ 改发 url 重试一次 */
+            /* 优先外链；仅在 400 明确拒绝此参数时去掉参数重试一次，200 后绝不补发。 */
             if (resp2.status === 400 && /response_format/i.test(why2)) {
-                log("站点要求 response_format=url，改用 url 重试");
+                log("站点不接受 response_format，省略此参数重试");
                 resp2 = await fetch(base + "/images/generations", {
                     method: "POST", headers: headers, signal: ctl.signal,
-                    body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "url" })
+                    body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined })
                 });
                 why2 = resp2.ok ? "" : await resp2.text();   /* body 只能读一次，重试后立刻读走 */
             }
             if (resp2.ok) {
                 const result2 = await readOpenAIResponse(resp2);
                 const u2 = imgUrlFromGen(result2);
-                if (u2) { const img2 = await normalizeImageToDataUrl(u2, ctl.signal); ctl.dispose(); return { image: img2, prompt: finalPrompt, via: "generations" }; }
+                if (u2) { const img2 = await normalizeImageResult(u2, ctl.signal); ctl.dispose(); return { image: img2, prompt: finalPrompt, via: "generations" }; }
                 ctl.dispose();
                 throw new Error("images 接口响应未包含图片 / " + lastErr);
             }
@@ -3102,89 +3163,19 @@
         }
     }
 
-    async function extractImageFromChatResponse(result) {
-        const u = imgUrlFromChat(result);
-        if (u) return await normalizeImageToDataUrl(u);
-        log("响应中没有图片");
-        throw new Error("API 响应中没有找到图片");
-    }
-    async function normalizeImageToDataUrl(u, signal) {
-        if (!u) return "";
-        if (String(u).startsWith("data:image/")) return u;
-        const url = new URL(String(u), window.location.href);
+    /* 只校验返回值。外链直接显示，不下载、不上传、不制造内嵌聊天副本。 */
+    async function normalizeImageResult(value, signal) {
+        if (signal && signal.aborted) throw new DOMException("aborted", "AbortError");
+        if (!value) return "";
+        const image = String(value);
+        if (image.startsWith("data:image/")) return image;
+        const url = new URL(image, window.location.href);
         if (!/^https?:$/.test(url.protocol)) throw new Error("不支持的图片地址");
-        let reason = "";
-        const canProxy = url.origin !== window.location.origin && ctx() && typeof ctx().getRequestHeaders === "function";
-        for (const proxy of (canProxy ? [false, true] : [false])) {
-            try { return await dataUrlFromUrl(String(u), signal, proxy); }
-            catch (e) {
-                if (signal && signal.aborted) throw e;
-                /* 单次下载的 120 秒超时不等于用户取消；保留原地址供代理或重试保存。 */
-                reason = e && e.name === "AbortError" ? "下载图片超时" : String(e && e.message || e);
-            }
-        }
-        const e = new Error("图片已生成，但下载保存失败（" + reason + "）。请重试保存；若跨域下载被拦截，需要酒馆启用 CORS 代理。不会重新生图。");
-        e.sdgImageDownload = true;
-        e.sdgImageUrl = String(u);
-        throw e;
+        return image;
     }
-    function isRemoteImage(src) {
-        try {
-            if (!/^(https?:)?\/\//i.test(String(src || "").trim())) return false;
-            const url = new URL(String(src || ""), window.location.href);
-            return /^https?:$/.test(url.protocol) && url.origin !== window.location.origin;
-        } catch (e) { return false; }
-    }
-
-    /* 把生成的图（dataURL）上传到酒馆服务器存成文件，聊天记录里只留链接。
-       不上传的话整张图的 base64 会写进聊天文件，几十次生图后聊天文件上百 MB，
-       手机端 Node 读进内存直接 OOM 崩溃。上传失败则原样返回（老行为兜底）。 */
-    async function persistGenImage(imageUrl) {
-        let ctl = null;
-        try {
-            if (isRemoteImage(imageUrl)) {
-                ctl = createGenController();
-                imageUrl = await normalizeImageToDataUrl(imageUrl, ctl.signal);
-            }
-            if (!String(imageUrl).startsWith("data:image/")) return imageUrl;
-            const cont = ctx();
-            if (!cont || typeof cont.getRequestHeaders !== "function") return imageUrl;
-            const s = String(imageUrl);
-            const meta = s.slice(0, s.indexOf(","));
-            const b64 = s.slice(s.indexOf(",") + 1);
-            const format = /image\/jpe?g/.test(meta) ? "jpeg" : (/image\/webp/.test(meta) ? "webp" : (/image\/gif/.test(meta) ? "gif" : (/image\/bmp/.test(meta) ? "bmp" : "png")));
-            const chName = (cont.characterId !== undefined && cont.characters && cont.characters[cont.characterId]) ? String(cont.characters[cont.characterId].name || "") : "";
-            const filename = "sdg_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-            /* 生图接口已返回后仍在保存中；这段也要能被「停止」和生图超时掐断。 */
-            if (!ctl) ctl = createGenController();
-            const res = await fetch("/api/images/upload", {
-                method: "POST",
-                headers: cont.getRequestHeaders(),
-                body: JSON.stringify({ image: b64, format: format, ch_name: chName, filename: filename }),
-                signal: ctl.signal
-            });
-            if (!res.ok) { log("图片上传服务器失败，保留内嵌存储:", res.status); return imageUrl; }
-            const j = await res.json();
-            if (j && /^\/?images\/[^?#]+$/.test(String(j.path)) && !String(j.path).split("/").includes("..")) {
-                log("图片已存服务器:", j.path); return String(j.path).replace(/^\/+/, "");
-            }
-            log("上传响应缺少 path，保留内嵌存储");
-            return imageUrl;
-        } catch (e) {
-            const ae = ctl && genAbortError(ctl);
-            if (ae) throw ae;
-            if (e && (e.sdgImageDownload || e.name === "AbortError")) throw e;
-            if (!String(imageUrl).startsWith("data:image/")) throw e;
-            log("图片上传异常，保留内嵌存储:", e && e.message); return imageUrl;
-        } finally { if (ctl) ctl.dispose(); }
-    }
-
-    /* 只访问插件自己的图库；每次重新遍历，兼容切 swipe 时酒馆替换 msg.extra。 */
     function visitImageRefs(chat, visit) {
-        const seen = new Set();
         const extra = function (ex) {
-            if (!ex || typeof ex !== "object" || seen.has(ex)) return;
-            seen.add(ex);
+            if (!ex || typeof ex !== "object") return;
             const gal = ex.sdg_gal;
             if (gal && typeof gal === "object") Object.values(gal).forEach(function (sw) {
                 if (!sw || typeof sw !== "object") return;
@@ -3201,60 +3192,14 @@
             if (Array.isArray(msg.swipe_info)) msg.swipe_info.forEach(function (slot) { if (slot) extra(slot.extra); });
         });
     }
-    let imageBackupBusy = false, imageBackupCancelled = false;
-    async function backupChatImages(onlyUrl) {
-        const report = { saved: 0, failed: 0, stopped: false };
-        if (imageBackupBusy) { report.stopped = true; return report; }
-        const cont = ctx(), chat = (cont && cont.chat) || [], originalMessages = chat.slice();
-        const sameChat = () => ctx().chat === chat && originalMessages.every(msg => chat.indexOf(msg) >= 0);
-        const urls = new Set();
-        visitImageRefs(chat, function (_obj, _key, url) {
-            if (typeof url !== "string" || (onlyUrl && url !== onlyUrl)) return;
-            if (isRemoteImage(url) || (url.startsWith("data:image/") && typeof cont.getRequestHeaders === "function")) urls.add(url);
+
+    function assertChatImageBudget(chat) {
+        let inlineSize = 0;
+        visitImageRefs(chat || [], function (_obj, _key, url) {
+            if (typeof url === "string" && url.startsWith("data:image/")) inlineSize += url.length;
         });
-        imageBackupBusy = true;
-        imageBackupCancelled = false;
-        const buttons = qa("#sdg-backup-images, .sdg-save-image");
-        buttons.forEach(button => { button.disabled = true; });
-        try {
-            let n = 0;
-            for (const url of urls) {
-                if (!sameChat() || imageBackupCancelled) { report.stopped = true; break; }
-                setStatus("正在补存图片 " + (++n) + "/" + urls.size + "（不会重新生图）", C_OK);
-                try {
-                    const saved = await persistGenImage(url);
-                    if (!sameChat() || imageBackupCancelled) { report.stopped = true; break; }
-                    if (!saved || saved === url || isRemoteImage(saved)) { report.failed++; continue; }
-                    const changed = [];
-                    visitImageRefs(chat, function (obj, key, value) {
-                        if (value === url) { changed.push({ obj: obj, key: key }); obj[key] = saved; }
-                    });
-                    if (!changed.length) continue;
-                    const persisted = await persistChat("补存旧图", sameChat);
-                    if (!persisted) {
-                        changed.forEach(function (ref) { if (ref.obj[ref.key] === saved) ref.obj[ref.key] = url; });
-                        /* 等待保存时切 swipe，新 extra 可能包含新链接，也需回滚。 */
-                        if (sameChat()) visitImageRefs(chat, function (obj, key, value) { if (value === saved) obj[key] = url; });
-                        report.failed++;
-                    } else report.saved++;
-                    if (!sameChat() || imageBackupCancelled) { report.stopped = true; break; }
-                    qa("#chat .sdg-slot[data-sig]").forEach(slot => slot.removeAttribute("data-sig"));
-                    renderAllImages();
-                } catch (e) {
-                    if (!sameChat() || (e && e.name === "AbortError") || /已取消|超时/.test(String(e && e.message))) { report.stopped = true; break; }
-                    report.failed++;
-                    log("旧图补存失败，保留原记录:", e && e.message);
-                }
-            }
-            const summary = report.stopped ? "补存已停止，已保存 " + report.saved + " 张"
-                : urls.size ? "补存完成：已保存 " + report.saved + " 张，未成功 " + report.failed + " 张（失效链接需原站点或备份恢复）"
-                : "当前聊天没有需要补存的图片";
-            setStatus(summary, report.failed || report.stopped ? C_WARN : C_OK);
-            toast(summary, report.failed || report.stopped ? null : true);
-            return report;
-        } finally {
-            imageBackupBusy = false;
-            buttons.concat(qa("#sdg-backup-images, .sdg-save-image")).forEach(button => { button.disabled = false; });
+        if (inlineSize > 8 * 1024 * 1024) {
+            throw new Error("旧内嵌图片过大，已暂停本次聊天保存以减少内存风险；请先退出酒馆，用离线修复工具处理旧聊天；原图未删除");
         }
     }
 
@@ -3400,19 +3345,9 @@
         if (!finalPrompt) throw new Error("没有可用的生图提示词");
         log("生图最终提示词:", finalPrompt.slice(0, 200));
 
-        try {
-            const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
-            let imageUrl = (faceRef && String(cfg().faceRefMode) === "edits") ? await genEdits(finalPrompt, faceRef) : (await genImageUnified(finalPrompt)).image;
-            if ((c.convertToJpeg === true || String(c.convertToJpeg) === "true") && String(imageUrl).startsWith("data:image/")) {
-                try { imageUrl = await convertImageToJpeg(imageUrl); } catch (eJ) { log("转 JPEG 失败，保留原图:", eJ.message); }
-            }
-            imageUrl = await persistGenImage(imageUrl);
-            return { image: imageUrl, prompt: finalPrompt, saved: true };
-        } catch (e) {
-            /* 保留已计费的临时地址供重试下载，但每次显示都明确标注未保存。 */
-            if (e && e.sdgImageDownload) return { image: e.sdgImageUrl, prompt: finalPrompt, saved: false, warning: e.message };
-            throw e;
-        }
+        const faceRef = (cfg().faceRefOn && String(cfg().faceRef || "")) ? String(cfg().faceRef) : "";
+        const image = (faceRef && String(cfg().faceRefMode) === "edits") ? await genEdits(finalPrompt, faceRef) : (await genImageUnified(finalPrompt)).image;
+        return { image: image, prompt: finalPrompt, displayOnly: String(image).startsWith("data:image/") };
     }
 
     /* ============================================================
@@ -3633,7 +3568,7 @@
             if (ev.key === "Escape") {
                 ev.preventDefault(); ev.stopPropagation(); close();
             } else if (ev.key === "Tab") {
-                const buttons = Array.from(box.querySelectorAll("button:not(:disabled)"));
+                const buttons = Array.from(box.querySelectorAll("button:not(:disabled), a[download]"));
                 const index = buttons.indexOf(document.activeElement);
                 const next = index < 0 ? (ev.shiftKey ? buttons.length - 1 : 0) :
                     (index + (ev.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
@@ -3743,28 +3678,6 @@
         window.addEventListener("keydown", activate, true);
     }
 
-    let imageStorageEventsBound = false;
-    function updateImageStorageNotice(body, src) {
-        let note = Array.from(body.children).find(el => el.classList.contains("sdg-storage-note"));
-        if (!isRemoteImage(src)) { if (note) note.remove(); return; }
-        if (!note) {
-            note = document.createElement("div");
-            note.className = "sdg-storage-note";
-            note.innerHTML = '<span>仅临时链接，尚未保存；站点删图后会失效。</span><button type="button" class="sdg-save-image">重试保存</button>';
-            body.appendChild(note);
-        }
-        note.dataset.src = src;
-        note.querySelector("button").disabled = imageBackupBusy;
-        if (!imageStorageEventsBound) {
-            imageStorageEventsBound = true;
-            window.addEventListener("click", function (ev) {
-                const target = ev.target && ev.target.closest && ev.target.closest("#chat .sdg-storage-note .sdg-save-image");
-                if (!target || target.disabled) return;
-                ev.preventDefault(); ev.stopPropagation();
-                backupChatImages(target.closest(".sdg-storage-note").dataset.src);
-            }, true);
-        }
-    }
 
     /* 一个槽三种样子：生成图片按钮 / 生成中 / 折叠条+图 */
     function fillSlot(body, state, src, open, cur, total) {
@@ -3806,7 +3719,6 @@
                 prevImg.onerror = function () { prevImg.style.minHeight = ""; };
                 prevImg.setAttribute("src", src);
             }
-            updateImageStorageNotice(body, src);
             return;
         }
         body.innerHTML = barHTML +
@@ -3824,7 +3736,6 @@
             im.setAttribute("src", src);
             bindImagePreview(im);
         }
-        updateImageStorageNotice(body, src);
     }
 
     /* 在 mes_text 里只找「文本节点」里的标记，切成槽，其余节点（别的美化插件渲染的 HTML）原样不动。
@@ -3935,7 +3846,7 @@
     /* 槽建不出来时的兜底：至少把图挂在楼尾，别让她只看到一屏提示词文字 */
     function showOrphanImage(el, src) {
         let img = el.querySelector("img.sdg-img.sdg-orphan");
-        if (!src) { if (img) img.remove(); updateImageStorageNotice(el, ""); return false; }
+        if (!src) { if (img) img.remove(); return false; }
         if (!img) {
             img = document.createElement("img");
             img.className = "sdg-img sdg-orphan";
@@ -3949,7 +3860,6 @@
         }
         if (img.getAttribute("src") !== src) img.setAttribute("src", src);
         bindImagePreview(img);
-        updateImageStorageNotice(el, src);
         return true;
     }
 
@@ -3987,7 +3897,6 @@
             qa('#chat .mes[mesid="' + idx + '"] .sdg-slot').forEach(function (x) { x.remove(); });
             return showOrphanImage(el, hasAnyImage(msg) ? getImage(msg, 0) : "");
         }
-        updateImageStorageNotice(el, "");
 
         /* 第一遍：文本节点里的标记 → 槽（只碰文本，别的插件的 HTML 原样留着） */
         const have = el.querySelectorAll(".sdg-slot").length;
@@ -4180,7 +4089,10 @@
                         else if (r.reason === "duplicate") setStatus("这条已经在楼里了，没重复注入", C_WARN);
                         else setStatus("没注入（" + (r.reason || "未知") + "）", C_WARN);
                         if (promptReady) {
-                            await persistChat("自动生图前保存注入提示词");
+                            if (!await persistChat("自动生图前保存注入提示词")) {
+                                setStatus("聊天保存失败，已暂停自动生图；请先处理旧聊天文件", C_WARN);
+                                return;
+                            }
                             await waitForUiPaint();
                             if (runId !== extractEpoch) return;
                             if (!floorTargetMatches(target)) {
@@ -4252,22 +4164,41 @@
         if (idx >= 0) currentIdx = idx;
 
         const key = idx + ":" + slot;
-        if (genBusy[key]) { setStatus("这张正在生图中", C_WARN); return ""; }
+        if (Object.keys(genBusy).length) { setStatus("已有图片正在生成，请完成后再操作", C_WARN); return ""; }
+        if (q("#sdg-image-preview a[download]")) { setStatus("请先下载或关闭上一张图片预览，再生成下一张", C_WARN); return ""; }
         genBusy[key] = true;
         const swipeAtStart = msg ? swipeKey(msg) : null;
         if (msg) renderFloorImage(idx, { domRetry: 2 });
         setStatus("正在生图…", C_OK);
         const t0 = Date.now();
         try {
+            assertChatImageBudget(ctx().chat);
             const result = await generateImage(desc, layers);
             const image = result.image;
+            if (result.displayOnly) {
+                /* API 只给内嵌数据时仅在页面预览，不能让付费生成结果撑大服务器聊天。 */
+                openImagePreview(image);
+                const preview = q("#sdg-image-preview");
+                if (preview) {
+                    const download = document.createElement("a");
+                    download.textContent = "下载本次图片";
+                    download.href = image;
+                    download.download = "drawgen_" + Date.now() + (/^data:image\/jpe?g/i.test(image) ? ".jpg" : /^data:image\/webp/i.test(image) ? ".webp" : ".png");
+                    download.style.cssText = "position:absolute;top:12px;left:12px;z-index:5;padding:8px 12px;background:#222;color:#fff;border-radius:6px";
+                    preview.appendChild(download);
+                }
+                setStatus("本次接口只返回图片数据，未写入聊天；请下载后再关闭预览", C_WARN);
+                toast("图片仅临时预览，请点「下载本次图片」保存", null);
+                return image;
+            }
             let chatSaved = false;
             if (msg) {
                 /* 这楼还在不在？删楼后索引会整体左移，msg 可能已经被移出 chat，
                    往孤儿对象上写再 saveChat 等于白存 */
                 const alive = (ctx().chat || [])[idx] === msg || (ctx().chat || []).indexOf(msg) >= 0;
                 if (!alive) {
-                    setStatus("这楼已经没了，图没入库", C_WARN);
+                    openImagePreview(image);
+                    setStatus("原聊天已切换或楼层已删除，图片仅在预览中，请先保存", C_WARN);
                     return image;
                 }
                 setImage(msg, slot, image, swipeAtStart);
@@ -4283,15 +4214,10 @@
                 if (movedSwipe) setStatus("生图完成（期间切了回复，图在原来那条里）✓", C_WARN);
             }
             const dur = ((Date.now() - t0) / 1000).toFixed(1);
-            if (result.saved === false) {
-                setStatus(result.warning, C_WARN);
-                toast("图片已生成，但尚未保存到酒馆；请点图片下方「重试保存」，不会重新生图", null);
-            } else if (!chatSaved) {
-                setStatus("图片已生成，但聊天记录未保存成功，刷新前请重试保存聊天", C_WARN);
+            if (!chatSaved) {
+                setStatus("生图完成，但聊天保存失败；刷新前请先保存图片", C_WARN);
             } else {
-                const stored = String(image).startsWith("data:image/") ? "已保存聊天内嵌副本（文件上传未完成）" : "已保存到酒馆";
-                setStatus("生图完成，" + stored + "，耗时 " + dur + " 秒 ✓", C_OK);
-                toast("✅ " + stored, true);
+                setStatus("生图完成，图片链接已写入聊天（" + dur + "秒）", C_OK);
             }
             return image;
         } catch (e) {
@@ -4569,7 +4495,6 @@
     function onStop() {
         try {
             let n = 0;
-            if (imageBackupBusy) { imageBackupCancelled = true; n++; }
             /* 排队的自动提取 / 失败重试也一并取消，不然停了当前请求一会儿又自己跑起来 */
             if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
             pendingAutoIdx = -1;
@@ -4851,7 +4776,6 @@
                         '<option value="edits"' + (cfg().faceRefMode === "edits" ? " selected" : "") + '>编辑接口（/images/edits，Grok 编辑模型等）</option>' +
                     '</select>') +
                     chk("sdg-gen-proxy", "genProxy", "Gemini 走酒馆后端代理") +
-                    chk("sdg-jpeg", "convertToJpeg", "入库前转 JPEG") +
 
                     '<h5>自动化</h5>' +
                     chk("sdg-auto-extract", "autoExtract", "收到回复后自动提取") +
@@ -4866,9 +4790,7 @@
                         field("存图天数", textInput("sdg-keepdays", "imageKeepDays", "0", "number")) +
                     '</div>' +
                     '<div class="sdg-hint">生图超时或点「停止」不会补发。存图天数：0 = 长期保留；正数会删除超期的本地图片文件。已有设置继续生效。</div>' +
-                    '<h5>图片保存</h5>' +
-                    '<div class="sdg-storage-actions"><button type="button" id="sdg-backup-images" class="sdg-minibtn">补存当前聊天旧图</button><button type="button" id="sdg-keep-forever" class="sdg-minibtn">设为长期保留</button></div>' +
-                    '<div class="sdg-hint">新图自动下载并保存到酒馆。补存会处理本聊天全部回复的旧外链与内嵌图片，不会重新生图；已失效的外链需要原站点或备份恢复。</div>' +
+                    '<div class="sdg-hint">图片只保留 API 外链，不再自动下载或上传。外链到期可能失效；接口只返回图片数据时请在预览中下载，不写入聊天。存图天数仅清理以前已保存的本地图片。</div>' +
 
                     '<h5>插件</h5>' +
                     chk("sdg-enabled", "enabled", "启用生图工坊") +
@@ -5014,7 +4936,6 @@
         /* 生图设置 */
         bindSite("gen");
         bindChk("#sdg-gen-proxy", "genProxy");
-        bindChk("#sdg-jpeg", "convertToJpeg");
         bindChk("#sdg-face-on", "faceRefOn");
         const faceMode = q("#sdg-face-mode");
         if (faceMode) faceMode.addEventListener("change", function () { save("faceRefMode", faceMode.value); });
@@ -5082,12 +5003,6 @@
             const v = Number.isFinite(raw) && raw > 0 ? Math.max(1, Math.round(raw)) : 0;
             save("imageKeepDays", v);
             if (String(v) !== String(ev.target.value)) ev.target.value = v;
-        });
-        q("#sdg-backup-images").addEventListener("click", function () { backupChatImages(); });
-        q("#sdg-keep-forever").addEventListener("click", function () {
-            save("imageKeepDays", 0);
-            q("#sdg-keepdays").value = "0";
-            setStatus("本地图片已设为长期保留，不再按天自动删除", C_OK);
         });
         numField("#sdg-gen-timeout", "genTimeout", 300, 30, null, null);
         bindChk("#sdg-enabled", "enabled", function () { syncDrawer(); });
@@ -5476,8 +5391,8 @@
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
             genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone,
-            parseChatResponse, callSubAI, runExtract, onStop, persistChat, persistGenImage, generateForFloor, onRegenFloor,
-            normalizeImageToDataUrl, generateImage, backupChatImages
+            parseChatResponse, callSubAI, runExtract, onStop, persistChat, generateForFloor, onRegenFloor,
+            normalizeImageResult, generateImage
         };
     }
 

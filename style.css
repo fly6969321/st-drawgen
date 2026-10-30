@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.10 */
+/* 生图工坊 · DrawGen v1.8.11 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -463,21 +463,6 @@
 .sdg-pg:hover { background: rgba(128, 128, 128, 0.26); }
 .sdg-pgn { font-size: 11px; opacity: 0.8; min-width: 30px; text-align: center; }
 .sdg-imgbox { position: relative; margin-top: 6px; }
-.sdg-storage-note {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
-    margin: 6px 0;
-    font-size: 12px;
-    line-height: 1.5;
-    color: inherit;
-    overflow-wrap: anywhere;
-}
-.sdg-save-image { cursor: pointer; color: inherit; font: inherit; padding: 3px 8px; border: 1px solid currentColor; border-radius: 6px; background: transparent; }
-.sdg-save-image:disabled { opacity: 0.6; cursor: default; }
-.sdg-storage-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.sdg-storage-actions .sdg-minibtn { width: auto; height: auto; min-height: 28px; max-width: 100%; padding: 6px 10px; white-space: normal; }
 .sdg-img {
     display: block;
     width: auto;

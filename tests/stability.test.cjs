@@ -343,17 +343,6 @@ test('coalesced chat saves resolve every caller after one save', async t => {
     assert.equal(saves, 1, '只调用一次 saveChat');
 });
 
-test('stopping while the generated image is uploading cancels persistence instead of claiming success', async t => {
-    const { w, debug, ctx } = fixture(t);
-    ctx.getRequestHeaders = () => ({});
-    w.fetch = async (_url, options) => {
-        assert.ok(options.signal, '上传请求要接入可取消信号');
-        debug.onStop();
-        throw new w.DOMException('aborted', 'AbortError');
-    };
-    await assert.rejects(debug.persistGenImage('data:image/png;base64,AAAA'), /已取消生图/);
-});
-
 test('trimSourceText keeps long source text intact up to 9000 chars', t => {
     const { debug } = fixture(t);
     const long = '剧'.repeat(12000);
