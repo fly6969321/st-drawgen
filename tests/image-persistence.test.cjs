@@ -18,7 +18,7 @@ function fixture(t, overrides = {}) {
     });
     t.after(() => dom.window.close());
     const w = dom.window, timers = new Map(), calls = [], saves = [];
-    let timerId = 0, downloads = 0, uploads = 0, downloadOk = true, uploadOk = true;
+    let timerId = 0, downloads = 0, uploads = 0, proxied = 0, downloadOk = true, uploadOk = true, proxyOk = false;
     w.setTimeout = (fn, ms = 0) => { timers.set(++timerId, { fn, ms }); return timerId; };
     w.clearTimeout = id => timers.delete(id);
     const msg = { mes: 'image###a cat###', is_user: false, extra: {}, swipe_id: 0, swipes: ['image###a cat###'], swipe_info: [{ extra: {} }] };
@@ -42,7 +42,15 @@ function fixture(t, overrides = {}) {
         if (generation) { const call = { url: u, body: JSON.parse(options.body) }; calls.push(call); return respond(call); }
         if (u === SIGNED) {
             downloads++;
-            if (!downloadOk) return { ok: false, status: 502, text: async () => 'bad gateway' };
+            if (!downloadOk) throw new TypeError('Failed to fetch');   // 跨域被拦就是这个样子
+            return { ok: true, status: 200, blob: async () => new w.Blob([PNG_BYTES], { type: 'image/png' }) };
+        }
+        if (u.indexOf('/proxy/') === 0) {
+            proxied++;
+            const inner = decodeURIComponent(u.slice('/proxy/'.length));
+            assert.equal(options.credentials, 'same-origin', '走酒馆代理要带同源凭据（CSRF）');
+            assert.equal(Object.keys(options.headers || {}).some(k => /authorization/i.test(k)), false, '绝不把 API 密钥转发给图片站');
+            if (!proxyOk || inner !== SIGNED) return { ok: false, status: 404, text: async () => 'not found' };
             return { ok: true, status: 200, blob: async () => new w.Blob([PNG_BYTES], { type: 'image/png' }) };
         }
         if (u === '/api/images/upload') {
@@ -69,8 +77,8 @@ function fixture(t, overrides = {}) {
         return result;
     };
     return { w, msg, settings, ctx, calls, saves, debug, finish, response, respond(fn) { respond = fn; },
-        setDownload(v) { downloadOk = v; }, setUpload(v) { uploadOk = v; },
-        downloads: () => downloads, uploads: () => uploads };
+        setDownload(v) { downloadOk = v; }, setUpload(v) { uploadOk = v; }, setProxy(v) { proxyOk = v; },
+        downloads: () => downloads, uploads: () => uploads, proxied: () => proxied };
 }
 
 test('接口回外链：先下载、再上传酒馆，聊天里落成本地路径', async t => {
@@ -108,13 +116,24 @@ test('上传失败：退回内嵌数据，仍写进聊天', async t => {
     assert.ok(f.saves.length > 0);
 });
 
-test('外链下载失败：退回原始外链，不假装上传', async t => {
+test('直连和酒馆代理都下不动：退回原始外链，不假装上传', async t => {
     const f = fixture(t);
     f.setDownload(false);
     assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), SIGNED);
-    assert.equal(f.downloads(), 1);
+    assert.equal(f.downloads(), 1, '先试直连');
+    assert.equal(f.proxied(), 1, '直连被拦后试过酒馆代理');
     assert.equal(f.uploads(), 0, '没拿到图片数据就不上传');
     assert.equal(f.debug.getImage(f.msg, 0), SIGNED);
+});
+
+test('直连被跨域拦住时改走酒馆 /proxy/ 代下载，仍存成本地文件', async t => {
+    const f = fixture(t);
+    f.setDownload(false); f.setProxy(true);
+    assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
+    assert.equal(f.downloads(), 1, '先试直连');
+    assert.equal(f.proxied(), 1, '直连被拦后走酒馆代理');
+    assert.equal(f.uploads(), 1, '代理拿到图片数据后照常上传');
+    assert.equal(f.debug.getImage(f.msg, 0), LOCAL, '最终存的是本地路径，不是会过期的外链');
 });
 
 test('images 接口返回 url：同样下载 + 上传，落本地路径', async t => {

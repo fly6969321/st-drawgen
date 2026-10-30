@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.15
+ *  生图工坊 · DrawGen v1.8.16
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -91,12 +91,16 @@
  *    只留最新的 N 张，不再按天）：扫服务器上插件自己生成的图，第 N 新那张的时间戳当分界线，
  *    比它旧的文件删掉、聊天引用摘掉；分界线存进设置，别的聊天打开时也按它摘引用。
  *    删文件的路径改成 user/images/<目录>/<文件>（和上传返回的一致，原先少了 user/ 一直删不掉）。
+ *  · v1.8.16 外链下载加酒馆代理兜底：站点给的多是 1 小时有效的签名外链（R2 等），浏览器直连
+ *    下载常被跨域拦住，只能把外链写进聊天、1 小时后图裂。现在直连被拦就改走酒馆 /proxy/
+ *    让服务器代下载（需 config.yaml 的 enableCorsProxy: true），两条都不通才存外链，
+ *    并在状态条明说"只存了外链、可能过期"。按文件头识别图片类型，octet-stream 也能存。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.15";
+    const VERSION = "1.8.16";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2763,12 +2767,6 @@
     /* ============================================================
        生图接口
        ============================================================ */
-    function directHeaders(contentType, auth) {
-        const headers = { "Accept": "*/*" };
-        if (contentType) headers["Content-Type"] = contentType;
-        if (auth) headers["Authorization"] = auth;
-        return headers;
-    }
 
     async function readOpenAIResponse(response) {
         const text = await response.text();
@@ -2834,22 +2832,64 @@
             reader.readAsDataURL(blob);
         });
     }
-    async function dataUrlFromUrl(url, signal) {
-        /* 带上生图的 signal 和一个独立超时：站点返回 url 而 CDN 卡住时，整条生图会永久悬挂，
-           那一槽一直转圈、点「停止」也掐不断（它不接 abort）。 */
-        const resp = await fetchWithTimeout(url, { headers: directHeaders(), signal: signal }, 120000);
-        if (!resp.ok) throw new Error("下载图片失败: " + resp.status);
-        const blob = await resp.blob();
-        return await blobToDataURL(blob);
+    /* 下载内容的真实类型：站点/代理偶尔给 application/octet-stream，按文件头认一遍 */
+    async function imageBlobType(blob) {
+        if (blob && blob.type && /^image\//i.test(blob.type)) return blob.type;
+        try {
+            const head = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+            const s = function (a, b) { return String.fromCharCode.apply(null, Array.prototype.slice.call(head, a, b)); };
+            if (head[0] === 0x89 && s(1, 4) === "PNG") return "image/png";
+            if (head[0] === 0xFF && head[1] === 0xD8) return "image/jpeg";
+            if (s(0, 4) === "GIF8") return "image/gif";
+            if (s(0, 4) === "RIFF" && s(8, 12) === "WEBP") return "image/webp";
+        } catch (e) {}
+        return "";
     }
-    /* 外链先下载成图片数据；下载失败就退回原始 URL（宁可存一个可能过期的外链，也别让已经生好的图丢掉）。 */
+    async function fetchImageBlob(url, signal, viaProxy) {
+        const headers = { "Accept": "image/*" };
+        let target = url, credentials = "omit";
+        if (viaProxy) {
+            /* 酒馆内置的跨域代理：由酒馆服务器去下载，浏览器不受跨域限制。
+               只带 CSRF 头，绝不把 API 密钥/登录凭据转发给图片站。 */
+            const c = ctx();
+            if (!c || typeof c.getRequestHeaders !== "function") throw new Error("没有酒馆上下文");
+            const local = c.getRequestHeaders() || {};
+            Object.keys(local).forEach(function (k) { if (k.toLowerCase() === "x-csrf-token") headers[k] = local[k]; });
+            target = "/proxy/" + encodeURIComponent(url);
+            credentials = "same-origin";
+        }
+        const resp = await fetchWithTimeout(target, { headers: headers, signal: signal, credentials: credentials }, 120000);
+        if (!resp.ok) throw new Error((viaProxy ? "酒馆代理 HTTP " : "HTTP ") + resp.status + (viaProxy && resp.status === 404 ? "（酒馆 config.yaml 里 enableCorsProxy 没打开）" : ""));
+        const blob = await resp.blob();
+        if (!blob || !blob.size) throw new Error("下载内容为空");
+        const type = await imageBlobType(blob);
+        if (!type) throw new Error("下载内容不是图片（可能是过期链接或错误页）");
+        return type === blob.type ? blob : new Blob([blob], { type: type });
+    }
+    let lastImageDownloadError = "";
+    async function dataUrlFromUrl(url, signal) {
+        /* 先浏览器直连；跨域被拦（Failed to fetch）就改走酒馆 /proxy/ 让服务器代下载。
+           两条都不通才放弃。带上生图的 signal 和独立超时，CDN 卡住时「停止」能掐断。 */
+        let direct = "";
+        try { return await blobToDataURL(await fetchImageBlob(url, signal, false)); }
+        catch (e) { if (signal && signal.aborted) throw e; direct = String(e && e.message || e); }
+        try { return await blobToDataURL(await fetchImageBlob(url, signal, true)); }
+        catch (e2) {
+            if (signal && signal.aborted) throw e2;
+            throw new Error("直连：" + direct + "；代理：" + String(e2 && e2.message || e2));
+        }
+    }
+    /* 外链先下载成图片数据；两条路都下不动就退回原始 URL（宁可存一个可能过期的外链，也别让已经生好的图丢掉），
+       并把原因记下来，生成完成时提示她这张只存了外链。 */
     async function normalizeImageToDataUrl(u, signal) {
         if (!u) return "";
         if (String(u).startsWith("data:image/")) return u;
+        lastImageDownloadError = "";
         try { return await dataUrlFromUrl(u, signal); }
         catch (e) {
             if (signal && signal.aborted) throw e;
-            log("下载失败，直接用 URL 兜底:", e.message); return u;
+            lastImageDownloadError = String(e && e.message || e);
+            log("下载失败，直接用 URL 兜底:", lastImageDownloadError); return u;
         }
     }
     /* 把生成好的内嵌图上传到酒馆服务器存成文件，聊天里只留一个本地路径（images/…）。
@@ -4252,8 +4292,13 @@
             const dur = ((Date.now() - t0) / 1000).toFixed(1);
             if (!chatSaved) {
                 setStatus("生图完成，但聊天保存失败；刷新前请先保存图片", C_WARN);
+            } else if (/^https?:\/\//i.test(String(image))) {
+                /* 两条下载路都没通，只能把站点的外链写进去——这种链接多半有时效，必须说清 */
+                log("只存了外链，没能存成本地文件：", lastImageDownloadError);
+                setStatus("生图完成，但只存了外链（下载被拦，可能过期）：" + lastImageDownloadError, C_WARN);
+                toast("这张图只存了外链，可能会过期", null);
             } else {
-                setStatus("生图完成，图片链接已写入聊天（" + dur + "秒）", C_OK);
+                setStatus("生图完成，已存成本地文件（" + dur + "秒）", C_OK);
             }
             return image;
         } catch (e) {
