@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.17
+ *  生图工坊 · DrawGen v1.8.18
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -100,12 +100,15 @@
  *    后台自动重试补存（约 90 秒、10 分钟各一次：下载→上传，成功就把聊天里那条外链原地
  *    换成本地路径；失败不动任何数据）。③状态条加高可滚动、失败原因不再被截断；
  *    完成状态区分「已存本地 / 只存外链 / 只存内嵌数据」。
+ *  · v1.8.18 旧外链扫尾补存：打开聊天 / 加载插件时扫一遍图库里还挂着 http(s) 外链的插件图
+ *    （这类外链不一定是固定 1 小时，看渠道，可能还活着），串行、一次打开最多试 3 条、
+ *    失败记 6 小时内不再碰；成功就把外链原地换成本地路径并落盘，失败绝不改动任何数据。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.17";
+    const VERSION = "1.8.18";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -2850,7 +2853,7 @@
         } catch (e) {}
         return "";
     }
-    async function fetchImageBlob(url, signal, viaProxy) {
+    async function fetchImageBlob(url, signal, viaProxy, timeoutMs) {
         const headers = { "Accept": "image/*" };
         let target = url, credentials = "omit";
         if (viaProxy) {
@@ -2863,7 +2866,7 @@
             target = "/proxy/" + encodeURIComponent(url);
             credentials = "same-origin";
         }
-        const resp = await fetchWithTimeout(target, { headers: headers, signal: signal, credentials: credentials }, 120000);
+        const resp = await fetchWithTimeout(target, { headers: headers, signal: signal, credentials: credentials }, timeoutMs || 120000);
         if (!resp.ok) throw new Error((viaProxy ? "酒馆代理 HTTP " : "HTTP ") + resp.status + (viaProxy && resp.status === 404 ? "（酒馆 config.yaml 里 enableCorsProxy 没打开）" : ""));
         const blob = await resp.blob();
         if (!blob || !blob.size) throw new Error("下载内容为空");
@@ -2872,13 +2875,13 @@
         return type === blob.type ? blob : new Blob([blob], { type: type });
     }
     let lastImageDownloadError = "";
-    async function dataUrlFromUrl(url, signal) {
+    async function dataUrlFromUrl(url, signal, timeoutMs) {
         /* 先浏览器直连；跨域被拦（Failed to fetch）就改走酒馆 /proxy/ 让服务器代下载。
            两条都不通才放弃。带上生图的 signal 和独立超时，CDN 卡住时「停止」能掐断。 */
         let direct = "";
-        try { return await blobToDataURL(await fetchImageBlob(url, signal, false)); }
+        try { return await blobToDataURL(await fetchImageBlob(url, signal, false, timeoutMs)); }
         catch (e) { if (signal && signal.aborted) throw e; direct = String(e && e.message || e); }
-        try { return await blobToDataURL(await fetchImageBlob(url, signal, true)); }
+        try { return await blobToDataURL(await fetchImageBlob(url, signal, true, timeoutMs)); }
         catch (e2) {
             if (signal && signal.aborted) throw e2;
             throw new Error("直连：" + direct + "；代理：" + String(e2 && e2.message || e2));
@@ -2998,6 +3001,76 @@
             }, delays[n]);
         };
         attempt(0);
+    }
+
+    /* —— 旧外链扫尾补存 ——
+       打开聊天时顺手扫一遍图库：还挂着 http(s) 外链的插件图（1.8.11 时期留下的、
+       或生成时下载被拦的），趁外链可能还有效，试着下载→上传，成功就原地换成本地路径。
+       串行、一次一张；每次打开最多补 LINK_SWEEP_MAX 张；失败过的记下来、几小时内不再碰
+       （外链过期失败很正常，不反复打）。失败绝不改动任何数据。 */
+    const LINK_SWEEP_MAX = 3;
+    const linkSweepFailed = {};
+    let linkSweepRunning = false;
+    async function sweepExternalLinks() {
+        if (linkSweepRunning) return 0;
+        let chat = null;
+        try { chat = ctx().chat; } catch (e) { return 0; }
+        if (!chat) return 0;
+        const targets = [], seen = new Set();
+        chat.forEach(function (msg) {
+            const ex = msg && msg.extra;
+            if (!ex) return;
+            const gal = ex.sdg_gal;
+            if (!gal || typeof gal !== "object") return;
+            Object.keys(gal).forEach(function (sk) {
+                const sw = gal[sk];
+                if (!sw || typeof sw !== "object") return;
+                Object.keys(sw).forEach(function (slot) {
+                    const rec = sw[slot];
+                    if (!rec || !Array.isArray(rec.list)) return;
+                    rec.list.forEach(function (u) {
+                        if (typeof u === "string" && /^https?:\/\//i.test(u) && !seen.has(u)) {
+                            seen.add(u);
+                            targets.push({ msg: msg, slot: slot, url: u });
+                        }
+                    });
+                });
+            });
+        });
+        if (!targets.length) return 0;
+        linkSweepRunning = true;
+        let saved = 0, tried = 0, changed = false;
+        try {
+            for (const t of targets) {
+                if (tried >= LINK_SWEEP_MAX) break;   /* 上限按"尝试次数"算，死链多也不会拖太久 */
+                if (linkSweepFailed[t.url] && Date.now() - linkSweepFailed[t.url] < 6 * 3600 * 1000) continue;
+                tried++;
+                try {
+                    if (ctx().chat !== chat) break;   /* 聊天切走就停 */
+                    const ctl = createGenController();
+                    let dataUrl = "";
+                    try { dataUrl = await dataUrlFromUrl(t.url, ctl.signal, 20000); }
+                    finally { ctl.dispose(); }
+                    if (!String(dataUrl).startsWith("data:image/")) throw new Error("下载结果不是图片");
+                    const local = String(await persistGenImage(dataUrl));
+                    if (local.startsWith("data:image/") || /^https?:/i.test(local)) throw new Error("上传没成功");
+                    if (replaceGalleryRef(t.msg, t.slot, t.url, local)) {
+                        syncSwipeExtra(t.msg);
+                        changed = true; saved++;
+                        log("旧外链补存成功:", local);
+                    } else throw new Error("引用已不在");
+                } catch (e) {
+                    linkSweepFailed[t.url] = Date.now();
+                    log("旧外链补存失败（跳过）:", e && e.message);
+                }
+            }
+        } finally { linkSweepRunning = false; }
+        if (changed) {
+            persistChat("旧外链补存成本地文件");
+            try { renderAllImages(); } catch (e) {}
+            setStatus("已把 " + saved + " 张还能打开的旧外链补存成本地文件", C_OK);
+        }
+        return saved;
     }
     /* —— 生图统一请求（与 Tavo 生图工坊 v1.18.16 对齐） ——
        ① 主路径 chat/completions 多模态（尺寸 / 画质原样传）；地址直指 /images/generations 时跳过；
@@ -5443,13 +5516,13 @@
                     for (const k in tagsSeen) delete tagsSeen[k];
                     /* 分层框还是旧聊天的内容，不清会把旧场景沿用到新聊天 */
                     setLayerBoxes({});
-                    setTimeout(function () { healChatRecoveredRefs(); applyKeepCutoff(); renderAllImages(); installMesButtons(); }, 300);
+                    setTimeout(function () { healChatRecoveredRefs(); applyKeepCutoff(); renderAllImages(); installMesButtons(); sweepExternalLinks(); }, 300);
                     setTimeout(function () { cleanupOldImages(false); }, 4000);
                 });
             }
             if (c.event_types.APP_READY) {
                 c.eventSource.on(c.event_types.APP_READY, function () {
-                    setTimeout(function () { healChatRecoveredRefs(); applyKeepCutoff(); renderAllImages(); installMesButtons(); }, 500);
+                    setTimeout(function () { healChatRecoveredRefs(); applyKeepCutoff(); renderAllImages(); installMesButtons(); sweepExternalLinks(); }, 500);
                     setTimeout(function () { cleanupOldImages(false); }, 8000);
                 });
             }
@@ -5479,7 +5552,7 @@
                 } catch (e) {}
             }, { passive: true });
             /* 插件一加载就先把旧引用纠正、超限引用摘掉，再绘制——不用等切聊天 */
-            setTimeout(function () { healChatRecoveredRefs(); applyKeepCutoff(); renderAllImages(); installMesButtons(); }, 800);
+            setTimeout(function () { healChatRecoveredRefs(); applyKeepCutoff(); renderAllImages(); installMesButtons(); sweepExternalLinks(); }, 800);
             initialized = true;
             log("✓ 已加载 v" + VERSION);
         } catch (e) {
@@ -5511,7 +5584,7 @@
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
-            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone, healRecoveredUrl, healChatRecoveredRefs, applyKeepCutoff,
+            genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone, healRecoveredUrl, healChatRecoveredRefs, applyKeepCutoff, sweepExternalLinks, replaceGalleryRef,
             parseChatResponse, callSubAI, runExtract, onStop, persistChat, generateForFloor, onRegenFloor,
             normalizeImageToDataUrl, persistGenImage, generateImage
         };

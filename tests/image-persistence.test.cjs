@@ -261,3 +261,37 @@ test('只存了外链会后台重试补存：下载恢复后把聊天里的外�
     const saved = JSON.parse(f.saves.at(-1))[0];
     assert.equal(saved.extra.sdg_gal['0']['0'].list.at(-1), LOCAL, '补存后落盘');
 });
+
+test('打开聊天时扫尾：还能打开的旧外链被补存成本地路径', async t => {
+    const f = fixture(t);
+    f.debug.setImage(f.msg, 0, SIGNED);      // 模拟 1.8.11 时期留下的外链
+    f.debug.syncSwipeExtra(f.msg);
+    const saved = await f.finish(f.debug.sweepExternalLinks());
+    assert.equal(saved, 1, '补存了一张');
+    assert.equal(f.debug.getImage(f.msg, 0), LOCAL, '原地换成本地路径');
+    assert.equal(f.uploads(), 1);
+    assert.ok(f.saves.length > 0, '补存后落盘');
+});
+
+test('扫尾失败的外链：引用不动，且不再立刻重试', async t => {
+    const f = fixture(t);
+    f.debug.setImage(f.msg, 0, SIGNED);
+    f.debug.syncSwipeExtra(f.msg);
+    f.setDownload(false);
+    assert.equal(await f.finish(f.debug.sweepExternalLinks()), 0, '下不动就跳过');
+    assert.equal(f.debug.getImage(f.msg, 0), SIGNED, '失败不动引用');
+    const downloadsBefore = f.downloads();
+    f.setDownload(true);                      // 网络恢复，但这一轮记住了失败
+    assert.equal(await f.finish(f.debug.sweepExternalLinks()), 0, '失败过的先不碰');
+    assert.equal(f.downloads(), downloadsBefore, '没有再次请求');
+    assert.equal(f.debug.getImage(f.msg, 0), SIGNED);
+});
+
+test('扫尾上限：一次打开最多试 3 条外链', async t => {
+    const f = fixture(t);
+    for (let s = 0; s < 5; s++) f.debug.setImage(f.msg, s, SIGNED + '&n=' + s);
+    f.debug.syncSwipeExtra(f.msg);
+    f.setDownload(false);
+    await f.finish(f.debug.sweepExternalLinks());
+    assert.equal(f.proxied(), 3, '最多试 3 条（失败也算次数，死链多也不会拖太久）');
+});
