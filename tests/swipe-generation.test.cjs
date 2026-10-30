@@ -45,7 +45,7 @@ function fixture(t, msg = swipedMessage(), overrides = {}) {
     w.clearTimeout = id => timers.delete(id);
     w.requestAnimationFrame = fn => { queueMicrotask(() => fn(0)); return 0; };
     const settings = Object.assign({
-        sdgBuiltinSeeded17: true, enabled: true, imageKeepDays: 0,
+        sdgBuiltinSeeded17: true, enabled: true, imageKeepCount: 0,
         extEndpoint: 'https://extract.test/v1', extModel: 'test-extractor', extKey: 'test-only', extProxy: false,
         genEndpoint: 'https://images.test/v1', genModel: 'test-image-model', genKey: 'test-only', genProxy: false,
         genFixedPrompt: 'Setting: {Env}', genPostfixPrompt: '', convertToJpeg: false,

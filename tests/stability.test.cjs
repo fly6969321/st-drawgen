@@ -556,9 +556,9 @@ test('expired references are removed from every swipe snapshot and cannot be res
     assert.ok(!msg.extra.sdg_gal || !msg.extra.sdg_gal['0'], '恢复快照不会让过期图复活');
 });
 
-test('cleanupOldImages does nothing when 存图天数 is 0', async t => {
+test('cleanupOldImages does nothing when 保留张数 is 0', async t => {
     const msg = galMsg([imgPath(300)]);
-    const { w, debug, ctx } = fixture(t, { imageKeepDays: 0 }, [msg]);
+    const { w, debug, ctx } = fixture(t, { imageKeepCount: 0 }, [msg]);
     let calls = 0;
     w.fetch = () => { calls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) }); };
     ctx.getRequestHeaders = () => ({});
@@ -568,36 +568,35 @@ test('cleanupOldImages does nothing when 存图天数 is 0', async t => {
     assert.equal(msg.extra.sdg_gal['0']['0'].list.length, 1, '引用也不碰');
 });
 
-test('cleanupOldImages deletes expired server files and skips fresh ones', async t => {
-    const { w, debug, ctx, settings } = fixture(t, { imageKeepDays: 7 }, []);
-    const oldName = 'sdg_' + (Date.now() - 30 * 86400000) + '_old.png';
-    const freshName = 'sdg_' + (Date.now() - 86400000) + '_fresh.png';
+test('cleanupOldImages keeps only the newest N server files and deletes the rest', async t => {
+    const { w, debug, ctx, settings } = fixture(t, { imageKeepCount: 2 }, []);
+    const now = Date.now();
+    const names = [
+        'sdg_' + (now - 3 * 86400000) + '_oldest.png',
+        'sdg_' + (now - 2 * 86400000) + '_older.png',
+        'sdg_' + (now - 86400000) + '_fresh.png',
+        'sdg_' + now + '_newest.png',
+        '别人的图.png',
+    ];
     const deleted = [];
-
     ctx.getRequestHeaders = () => ({});
     w.fetch = (url, opt) => {
         const body = opt && opt.body ? JSON.parse(opt.body) : {};
-        if (String(url).includes('/api/images/folders')) {
-            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(['小明']) });
-        }
-        if (String(url).includes('/api/images/list')) {
-            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([oldName, freshName, '别人的图.png']) });
-        }
-        if (String(url).includes('/api/images/delete')) {
-            deleted.push(body.path);
-            return Promise.resolve({ ok: true, status: 200 });
-        }
+        if (String(url).includes('/api/images/folders')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(['小明']) });
+        if (String(url).includes('/api/images/list')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(names) });
+        if (String(url).includes('/api/images/delete')) { deleted.push(body.path); return Promise.resolve({ ok: true, status: 200 }); }
         return Promise.resolve({ ok: false, status: 404 });
     };
 
     const killed = await debug.cleanupOldImages(true);
-    assert.equal(killed, 1, '只删了一个');
-    assert.deepEqual(deleted, ['images/小明/' + oldName], '路径格式要和上传时存的一致，否则删除端点会判非法路径');
+    assert.equal(killed, 2, '4 张自己的图只留最新 2 张，删 2 张；别人的图不碰');
+    assert.deepEqual(deleted.sort(), ['user/images/小明/' + names[0], 'user/images/小明/' + names[1]].sort(), '路径和上传返回的一致（user/images/<目录>/<文件>）');
+    assert.equal(settings.imageKeepCutoff, now - 86400000, '分界线 = 第 N 新那张的时间戳');
     assert.ok(settings.imageCleanAt > 0, '记下清理时间，用于节流');
 });
 
 test('cleanupOldImages throttles itself unless forced', async t => {
-    const { w, debug, ctx } = fixture(t, { imageKeepDays: 7, imageCleanAt: Date.now() }, []);
+    const { w, debug, ctx } = fixture(t, { imageKeepCount: 200, imageCleanAt: Date.now() }, []);
     let calls = 0;
     ctx.getRequestHeaders = () => ({});
     w.fetch = () => { calls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) }); };
@@ -606,24 +605,25 @@ test('cleanupOldImages throttles itself unless forced', async t => {
     assert.equal(calls, 0, '不发请求');
 });
 
-test('cleanup throttle skips the server scan but still clears expired refs in the newly opened chat', async t => {
+test('cleanup throttle skips the server scan but still drops over-limit refs in the newly opened chat', async t => {
     const msg = galMsg([imgPath(30)]);
-    const { w, debug, ctx } = fixture(t, { imageKeepDays: 7, imageCleanAt: Date.now() }, [msg]);
+    const { w, debug, ctx } = fixture(t, { imageKeepCount: 200, imageCleanAt: Date.now(), imageKeepCutoff: Date.now() - 86400000 }, [msg]);
     let calls = 0;
     ctx.getRequestHeaders = () => ({});
     w.fetch = () => { calls++; return Promise.resolve({ ok: true, status: 200, json: async () => [] }); };
     assert.equal(await debug.cleanupOldImages(false), 0, '服务器扫描仍受节流');
     assert.equal(calls, 0, '没有扫描服务器目录');
-    assert.equal(msg.extra.sdg_gal['0'], undefined, '当前聊天中的过期引用仍然被摘掉');
+    assert.equal(msg.extra.sdg_gal['0'], undefined, '当前聊天中比分界线旧的引用仍然被摘掉');
 });
 
 test('a 404 from the delete endpoint still counts as cleaned', async t => {
-    const { w, debug, ctx } = fixture(t, { imageKeepDays: 7 }, []);
-    const oldName = 'sdg_' + (Date.now() - 30 * 86400000) + '_gone.png';
+    const { w, debug, ctx } = fixture(t, { imageKeepCount: 1 }, []);
+    const now = Date.now();
+    const oldName = 'sdg_' + (now - 30 * 86400000) + '_gone.png', newName = 'sdg_' + now + '_keep.png';
     ctx.getRequestHeaders = () => ({});
     w.fetch = (url) => {
         if (String(url).includes('/folders')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(['小明']) });
-        if (String(url).includes('/list')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([oldName]) });
+        if (String(url).includes('/list')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([oldName, newName]) });
         /* 文件本来就没了 */
         return Promise.resolve({ ok: false, status: 404 });
     };

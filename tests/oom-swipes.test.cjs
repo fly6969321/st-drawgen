@@ -25,7 +25,7 @@ function fixture(t, msg) {
     w.setTimeout = fn => (tasks.push(fn), tasks.length);
     w.clearTimeout = () => {};
     w.fetch = () => { throw new Error('gallery compaction must not perform network requests'); };
-    const ctx = { chat: [msg], extensionSettings: { 'st-drawgen': { sdgBuiltinSeeded17: true, imageKeepDays: 0 } }, saveSettingsDebounced() {} };
+    const ctx = { chat: [msg], extensionSettings: { 'st-drawgen': { sdgBuiltinSeeded17: true, imageKeepCount: 0 } }, saveSettingsDebounced() {} };
     w.SillyTavern = { getContext: () => ctx };
     w.eval(source); tasks.shift()();
     return { w, debug: w.__sdgDebug, ctx };

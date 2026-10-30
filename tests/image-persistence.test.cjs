@@ -25,7 +25,7 @@ function fixture(t, overrides = {}) {
     const settings = Object.assign({
         sdgBuiltinSeeded17: true, genEndpoint: 'https://images.test/v1', genModel: 'test-image', genKey: 'test-only',
         genProxy: false, genTimeout: 300, genFixedPrompt: '', genPostfixPrompt: '',
-        autoExtract: false, autoGenerate: false, imageKeepDays: 0,
+        autoExtract: false, autoGenerate: false, imageKeepCount: 0,
     }, overrides);
     const ctx = { chat: [msg], extensionSettings: { 'st-drawgen': settings }, saveSettingsDebounced() {},
         saveChat() { saves.push(JSON.stringify(this.chat)); }, getRequestHeaders: () => ({ 'Content-Type': 'application/json', 'X-CSRF-Token': 'test-only' }) };
@@ -207,4 +207,6 @@ test('旧的 DrawGenRecovered 引用（少了 user/ 前缀）会被纠正，楼�
     assert.equal(f.msg.swipe_info[0].extra.sdg_gal['0']['0'].list.at(-1), FIXED, 'swipe 快照同步纠正');
     assert.equal(f.debug.healRecoveredUrl('images/other/x.png'), 'images/other/x.png', '只改这一个前缀，别的路径不碰');
     assert.equal(f.debug.healRecoveredUrl('user/images/DrawGenRecovered/x.png'), 'user/images/DrawGenRecovered/x.png', '已正确的引用不重复处理');
+    assert.equal(f.debug.healRecoveredUrl('/images/DrawGenRecovered/y.png'), 'user/images/DrawGenRecovered/y.png', '带斜杠的也纠正');
+    assert.equal(f.debug.healRecoveredUrl('http://127.0.0.1:8000/images/DrawGenRecovered/z.png'), 'user/images/DrawGenRecovered/z.png', '带域名的也纠正');
 });

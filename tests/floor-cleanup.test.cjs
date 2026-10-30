@@ -7,7 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 
 const TAG = 'image###a girl walking into the forest, cinematic###';
 const TAG2 = 'image###close-up of her hand###';
-/* 文件名里的时间戳要用「刚刚」——「存图天数」会按这个时间戳摘掉超期的图，
+/* 文件名里的时间戳要用「刚刚」——「保留张数」清理会按这个时间戳摘掉超限的图，
    写死一个老时间戳的话测试会被那个功能清掉，跟这里要测的东西无关 */
 const TS = Date.now();
 const P1 = 'images/user/sdg_' + TS + '_aaaaaa.png';
