@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.18
+ *  生图工坊 · DrawGen v1.8.19
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -103,12 +103,16 @@
  *  · v1.8.18 旧外链扫尾补存：打开聊天 / 加载插件时扫一遍图库里还挂着 http(s) 外链的插件图
  *    （这类外链不一定是固定 1 小时，看渠道，可能还活着），串行、一次打开最多试 3 条、
  *    失败记 6 小时内不再碰；成功就把外链原地换成本地路径并落盘，失败绝不改动任何数据。
+ *  · v1.8.19 新增站点选项「生成通道」（像画质那样下拉、随站点档案保存）：
+ *    默认 = 先 chat/completions，失败再退 images/generations（老行为）；
+ *    chat = 只打 chat/completions；images = 只打 images/generations。
+ *    有的站不支持 chat 端点（模型只在 images 端点，chat 会回 400），选 images 就不用每次先撞一次 400。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.18";
+    const VERSION = "1.8.19";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -173,6 +177,7 @@
         anchorsJson: "", anchorsId: "",  // 角色锚点预设
         grokSize: "1024x1024",
         genQuality: "",            // 画质参数：GPT 2.5 系 low/medium/high/xhigh/max；Grok low/medium/auto；留空不发送（随站点档案保存）
+        genChannel: "auto",        // 生图通道：auto=先 chat 失败退 images | chat=只用 chat/completions | images=只用 images/generations（随站点档案保存）
         genProxy: false,
         genTimeout: 300,
         imageKeepCount: 200,       // 只保留最新的 N 张本地图片（服务器文件 + 聊天引用），超出的旧图删掉；0 = 不清理
@@ -1442,7 +1447,7 @@
        ============================================================ */
     const PROF_FIELDS = {
         ext: { endpoint: "extEndpoint", key: "extKey", model: "extModel" },
-        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize", quality: "genQuality" }
+        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize", quality: "genQuality", channel: "genChannel" }
     };
     function profJsonKey(kind) { return kind === "gen" ? "genProfilesJson" : "extProfilesJson"; }
     function profIdKey(kind) { return kind === "gen" ? "genProfileId" : "extProfileId"; }
@@ -1504,7 +1509,7 @@
         const name = window.prompt("新站点名字", "站点" + (list.length + 1));
         if (name === null) return;
         const p = { id: newId(), name: String(name).trim() || "站点" + (list.length + 1), endpoint: "", key: "", model: "", models: [] };
-        if (kind === "gen") { p.size = cfg().grokSize || "1024x1024"; p.quality = cfg().genQuality || ""; }
+        if (kind === "gen") { p.size = cfg().grokSize || "1024x1024"; p.quality = cfg().genQuality || ""; p.channel = cfg().genChannel || "auto"; }
         list.push(p);
         saveProfiles(kind, list);
         saveCritical(profIdKey(kind), p.id);
@@ -3205,7 +3210,9 @@
         if (!c.genModel) throw new Error("请先填写生图模型");
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
         if (!base) throw new Error("请先填写生图 API 地址");
-        const imagesOnly = /\/images\/generations$/.test(base);   /* 地址直指 images 接口：直连，不再先白打一次 chat */
+        const channel = String(c.genChannel || "auto");   /* auto | chat | images */
+        /* images：只走 images 接口（地址直指 images 也算），不再先白打一次 chat */
+        const imagesOnly = channel === "images" || /\/images\/generations$/.test(base);
         base = base.replace(/\/(images\/generations|chat\/completions)$/, "");
         const size = normalizeGenSize(c.grokSize);
         const quality = String(c.genQuality || "").trim();       /* GPT 2.5 low~max；Grok low/medium/auto；留空不发送 */
@@ -3269,7 +3276,7 @@
                 const t = await resp.text();
                 lastErr = "chat 接口 " + siteErrorBrief(resp.status, t);
                 moderated = (resp.status === 400 || resp.status === 403) && isModerationBlock(t);
-                canFallback = !moderated && (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 400);
+                canFallback = channel !== "chat" && !moderated && (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 400);
             }
         } catch (e) {
             const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
@@ -3292,7 +3299,9 @@
                 ? "（站点已返回 200，可能已计费，没有再试 images 接口以免重复扣费）"
                 : moderated
                     ? "（内容被站点审核拒了，没再试 images 接口：同一个提示词退过去也是一样被拒）"
-                    : netErr
+                    : channel === "chat"
+                        ? "（这个站点设的是「只用 chat/completions」，没有退 images；要让它退把生成通道改成默认）"
+                        : netErr
                         ? "（连接中断不代表站点没生成：可能已扣费，未自动重试；要重试请自己点重画）"
                         : "（没再试 images 接口：这类错误退了也是同样结果）"));
         }
@@ -4958,6 +4967,7 @@
     }
 
     function panelHTML() {
+        const genCh = String(cfg().genChannel || "auto");
         const sysList = getSystemPrompts();
         const sysOpts = sysList.map(p => '<option value="' + esc(p.id) + '"' + (p.id === cfg().extActiveSystemPrompt ? " selected" : "") + '>' + esc(p.name) + '</option>').join("");
         return '' +
@@ -4996,6 +5006,11 @@
                         '<option value="max"' + (cfg().genQuality === "max" ? " selected" : "") + '>max</option>' +
                         '<option value="auto"' + (cfg().genQuality === "auto" ? " selected" : "") + '>auto（Grok）</option>' +
                     '</select><div class="sdg-hint">GPT 2.5 系：low/medium/high/xhigh/max；Grok：low/medium/auto；随站点档案保存</div>') +
+                    field("生成通道", '<select id="sdg-gen-channel">' +
+                        '<option value="auto"' + (genCh === "auto" ? " selected" : "") + '>默认（先 chat，失败退 images）</option>' +
+                        '<option value="chat"' + (genCh === "chat" ? " selected" : "") + '>只用 chat/completions</option>' +
+                        '<option value="images"' + (genCh === "images" ? " selected" : "") + '>只用 images/generations</option>' +
+                    '</select>') +
                     chk("sdg-gen-proxy", "genProxy", "走酒馆后端代理（绕跨域）") +
 
                     '<h5>自动化</h5>' +
@@ -5260,6 +5275,7 @@
         if (kind === "gen") {
             on("#sdg-grok-size", "change", function (e) { saveProfileField("gen", "size", e.target.value); });
             on("#sdg-gen-quality", "change", function (e) { saveProfileField("gen", "quality", e.target.value); });
+            on("#sdg-gen-channel", "change", function (e) { saveProfileField("gen", "channel", e.target.value); setStatus("生成通道已改为：" + e.target.value, C_OK); });
         }
 
         /* 模型：下拉选中就存；✎ 切换手动输入框 */
@@ -5304,6 +5320,7 @@
         if (kind === "gen") {
             const sz = q("#sdg-grok-size"); if (sz) sz.value = c.grokSize || "1024x1024";
             const ql = q("#sdg-gen-quality"); if (ql) ql.value = c.genQuality || "";
+            const chn = q("#sdg-gen-channel"); if (chn) chn.value = c.genChannel || "auto";
         }
         renderModelSelect(kind);
     }

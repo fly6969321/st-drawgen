@@ -2,6 +2,14 @@
 
 第三方生图扩展。
 
+## 1.8.19 站点里可选「生成通道」
+
+- 每个生图站点多了一个下拉「生成通道」（和画质一样，随站点档案保存）：
+  - **默认**：先打 `chat/completions`，失败再退 `images/generations`（老行为，不用改）。
+  - **只用 chat/completions**：只走 chat，失败也不退 images。
+  - **只用 images/generations**：直接走 images，不再先白打一次 chat。
+- 有的站不支持 chat 端点（模型只在 images 端点，chat 会回 400 "not supported on the Chat Completions endpoint"）——给那种站选「只用 images/generations」，就不会每次先在后台留一条 400 报错了。
+
 ## 1.8.18 旧外链扫尾补存
 
 - 打开聊天 / 加载插件时扫一遍图库：还挂着 `http(s)` 外链的**插件自己生成的图**（1.8.11 时期留下的、或生成时下载被拦的），趁外链可能还有效，试着下载→上传，成功就原地换成本地路径并落盘；失败绝不改动数据。

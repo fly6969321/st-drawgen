@@ -295,3 +295,28 @@ test('扫尾上限：一次打开最多试 3 条外链', async t => {
     await f.finish(f.debug.sweepExternalLinks());
     assert.equal(f.proxied(), 3, '最多试 3 条（失败也算次数，死链多也不会拖太久）');
 });
+
+test('生成通道=images：直接只打 images 接口，不先白打 chat', async t => {
+    const f = fixture(t, { genChannel: 'images' });
+    f.respond(() => f.response({ data: [{ b64_json: BASE64 }] }));
+    assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
+    assert.equal(f.calls.length, 1, '只发一发');
+    assert.match(f.calls[0].url, /images\/generations$/);
+});
+
+test('生成通道=chat：只打 chat，站点 400 也不退 images', async t => {
+    const f = fixture(t, { genChannel: 'chat' });
+    f.respond(() => f.response({ error: { message: 'This model is not supported on the Chat Completions endpoint' } }, 400));
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /只用 chat/);
+    assert.equal(f.calls.length, 1, '不退 images，只发 chat 一发');
+    assert.match(f.calls[0].url, /chat\/completions$/);
+});
+
+test('生成通道=默认：chat 400 时仍退 images（老行为不变）', async t => {
+    const f = fixture(t);
+    f.respond(call => /chat\/completions/.test(call.url)
+        ? f.response({ error: { message: 'This model is not supported on the Chat Completions endpoint' } }, 400)
+        : f.response({ data: [{ b64_json: BASE64 }] }));
+    assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
+    assert.equal(f.calls.length, 2, 'chat 一发 + images 一发');
+});
