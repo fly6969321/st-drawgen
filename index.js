@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.20
+ *  生图工坊 · DrawGen v1.8.21
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -111,12 +111,15 @@
  *    关着时每次点击只发一次生图请求、失败就报错（换通道兜底与 b64→url 改发都受它管，
  *    打开后两种重发共享「最多再发一发」的预算；网络中断与超时永远不自动补发）。
  *    ②插件总开关（启用生图工坊）从面板里挪到顶栏，显示「开 / 关」，点一下即切换。
+ *  · v1.8.21 顶栏快捷键定稿：🌙 日夜图标 · 🎨 悬浮球图标按钮（点一下开/关，关了变暗）·
+ *    插件总开关做成圆形滑动开关（与「分层提取」同款）；面板里的对应勾选框保留不撤，
+ *    两处状态互相同步。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.20";
+    const VERSION = "1.8.21";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -4838,14 +4841,17 @@
         save("theme", cfg().theme === "day" ? "night" : "day");
         applyTheme();
     }
-    /* 顶栏插件开关：按钮上显示当前状态（开 / 关），点一下切换 */
-    function syncPower() {
-        const btn = q("#sdg-power");
-        if (!btn) return;
-        const on = !!cfg().enabled;
-        btn.textContent = on ? "开" : "关";
-        btn.title = on ? "生图工坊已开启 · 点击关闭" : "生图工坊已关闭 · 点击开启";
-        btn.classList.toggle("sdg-off", !on);
+    /* 顶栏开关与面板勾选框互相同步：两处都能开关，任一处切换后状态一致 */
+    function syncToggles() {
+        const on = !!cfg().enabled, ball = cfg().showBall !== false;
+        const tp = q("#sdg-power"); if (tp) tp.checked = on;
+        const te = q("#sdg-enabled"); if (te) te.checked = on;
+        const tb = q("#sdg-ball-toggle");
+        if (tb) {
+            tb.classList.toggle("sdg-ball-off", !ball);
+            tb.title = ball ? "悬浮球：显示中（点击隐藏）" : "悬浮球：已隐藏（点击显示）";
+        }
+        const ts = q("#sdg-show-ball"); if (ts) ts.checked = ball;
     }
 
     /* ============================================================
@@ -5005,7 +5011,8 @@
             '<span class="sdg-title">🎨 生图工坊 <small>v' + VERSION + '</small></span>' +
             '<span class="sdg-head-r">' +
                 '<button type="button" id="sdg-theme" class="sdg-iconbtn">🌙</button>' +
-                '<button type="button" id="sdg-power" class="sdg-iconbtn"></button>' +
+                '<button type="button" id="sdg-ball-toggle" class="sdg-iconbtn" title="悬浮球（显示 / 隐藏）">🎨</button>' +
+                '<input type="checkbox" id="sdg-power" class="sdg-topswitch"' + (cfg().enabled ? " checked" : "") + ' title="插件总开关（开启 / 关闭）">' +
                 '<button type="button" id="sdg-panel-close" class="sdg-iconbtn">✕</button>' +
             '</span>' +
         '</div>' +
@@ -5060,6 +5067,7 @@
                     '<div class="sdg-hint">生图超时或点「停止」不会补发。保留张数：只留最新的 N 张本地图片，超出的旧图连文件一起删；0 = 不清理。</div>' +
 
                     '<h5>插件</h5>' +
+                    chk("sdg-enabled", "enabled", "启用生图工坊") +
                     chk("sdg-show-ball", "showBall", "显示悬浮球") +
                 '</section>' +
 
@@ -5128,7 +5136,7 @@
         const head = q("#sdg-panel-head");
         let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
         head.addEventListener("pointerdown", function (ev) {
-            if (ev.target.closest && ev.target.closest("button")) return;
+            if (ev.target.closest && ev.target.closest("button, input, label")) return;
             dragging = true; sx = ev.clientX; sy = ev.clientY;
             const r = panel.getBoundingClientRect(); ox = r.left; oy = r.top;
             try { head.setPointerCapture(ev.pointerId); } catch (e) {}
@@ -5146,12 +5154,19 @@
         });
         q("#sdg-panel-close").addEventListener("click", function () { showPanel(false); });
         q("#sdg-theme").addEventListener("click", toggleTheme);
-        q("#sdg-power").addEventListener("click", function () {
-            save("enabled", !cfg().enabled);
-            syncPower();
+        /* 顶栏开关：插件圆形滑块（change）+ 悬浮球图标按钮（click，点一下开/关） */
+        q("#sdg-ball-toggle").addEventListener("click", function () {
+            save("showBall", cfg().showBall === false);
+            applyBallVisible();
+            syncToggles();
             syncDrawer();
         });
-        syncPower();
+        q("#sdg-power").addEventListener("change", function (ev) {
+            save("enabled", ev.target.checked);
+            syncToggles();
+            syncDrawer();
+        });
+        syncToggles();
         qa(".sdg-grip").forEach(function (b) {
             b.addEventListener("click", function (ev) {
                 ev.preventDefault(); ev.stopPropagation();
@@ -5240,7 +5255,8 @@
             if (String(v) !== String(ev.target.value)) ev.target.value = v;
         });
         numField("#sdg-gen-timeout", "genTimeout", 300, 30, null, null);
-        bindChk("#sdg-show-ball", "showBall", function () { applyBallVisible(); syncDrawer(); });
+        bindChk("#sdg-enabled", "enabled", function () { syncToggles(); syncDrawer(); });
+        bindChk("#sdg-show-ball", "showBall", function () { applyBallVisible(); syncToggles(); syncDrawer(); });
 
         /* 画风 / 提取规则 / 角色锚点 预设 */
         bindPresets();

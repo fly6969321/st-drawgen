@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.20 */
+/* 生图工坊 · DrawGen v1.8.21 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -119,7 +119,38 @@
     padding: 0;
 }
 .sdg-iconbtn:hover { background: var(--sdg-line); }
-#sdg-power.sdg-off { opacity: 0.45; }
+/* 顶栏圆形滑动开关（与「分层提取」同款：圆点用径向渐变画、开=主色）；
+   用双 id 压过下面那条全局复选框画框规则 */
+#sdg-panel #sdg-panel-head input.sdg-topswitch {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    width: 46px !important;
+    min-width: 46px !important;
+    max-width: 46px !important;
+    height: 26px !important;
+    min-height: 26px !important;
+    max-height: 26px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    flex: 0 0 auto !important;
+    border: none !important;
+    border-radius: 999px !important;
+    background-color: rgba(128, 128, 128, 0.32) !important;
+    background-image: radial-gradient(circle 10px at 50% 50%, #ffffff 9.5px, rgba(255, 255, 255, 0) 10px) !important;
+    background-size: 20px 20px !important;
+    background-repeat: no-repeat !important;
+    background-position: 3px center !important;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.15) !important;
+    cursor: pointer;
+    transition: background-color 0.18s, background-position 0.18s;
+}
+#sdg-panel #sdg-panel-head input.sdg-topswitch:checked {
+    background-color: var(--sdg-accent) !important;
+    background-position: 23px center !important;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+}
+/* 顶栏悬浮球按钮：关掉时图标变暗 */
+#sdg-panel #sdg-panel-head button.sdg-ball-off { opacity: 0.45; }
 
 #sdg-panel-body {
     padding: 6px 12px 7px;
