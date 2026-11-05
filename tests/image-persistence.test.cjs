@@ -186,8 +186,8 @@ test('并发：全局已有生成时其它楼层不再付费，首个完成后�
     assert.equal(f.calls.length, 2);
 });
 
-test('参数类 400：b64_json 被拒就改要 url 重试一次，其余请求不变', async t => {
-    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations' });
+test('失败重试开着：b64_json 被拒就改要 url 重试一次，其余请求不变', async t => {
+    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations', genRetryOnce: true });
     f.respond(() => f.calls.length === 1
         ? f.response({ error: { message: 'Unsupported parameter: response_format' } }, 400)
         : f.response({ data: [{ url: SIGNED }] }));
@@ -200,12 +200,12 @@ test('参数类 400：b64_json 被拒就改要 url 重试一次，其余请求�
     assert.deepEqual(first, f.calls[0].body, '只有 response_format 变了，其余请求不变');
 });
 
-test('参数错误反复 400 只重试一次；无关 400 不重试', async t => {
-    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations' });
+test('失败重试开着：参数错误反复 400 只重试一次；无关 400 不重试', async t => {
+    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations', genRetryOnce: true });
     f.respond(() => f.response({ error: { message: 'Unsupported response_format' } }, 400));
     await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /400/);
     assert.equal(f.calls.length, 2, '不循环尝试生图');
-    const g = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations' });
+    const g = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations', genRetryOnce: true });
     g.respond(() => g.response({ error: { message: 'Invalid size' } }, 400));
     await assert.rejects(g.finish(g.debug.genImageUnified('a cat')), /400/);
     assert.equal(g.calls.length, 1);
@@ -221,8 +221,8 @@ test('网络层失败（Failed to fetch）：不自动补发第二发，报错�
     assert.match(calls[0], /\/chat\/completions$/);
 });
 
-test('站点明确回 404（接口不存在、肯定没扣费）：仍允许唯一一次换 images 兜底', async t => {
-    const f = fixture(t);
+test('失败重试开着：站点明确回 404 换 images 兜底，共两发', async t => {
+    const f = fixture(t, { genRetryOnce: true });
     f.respond(call => /chat\/completions/.test(call.url)
         ? f.response('not found', 404)
         : f.response({ data: [{ url: SIGNED }] }));
@@ -312,11 +312,45 @@ test('生成通道=chat：只打 chat，站点 400 也不退 images', async t =>
     assert.match(f.calls[0].url, /chat\/completions$/);
 });
 
-test('生成通道=默认：chat 400 时仍退 images（老行为不变）', async t => {
-    const f = fixture(t);
+test('生成通道=默认 + 失败重试开着：chat 400 时退 images', async t => {
+    const f = fixture(t, { genRetryOnce: true });
     f.respond(call => /chat\/completions/.test(call.url)
         ? f.response({ error: { message: 'This model is not supported on the Chat Completions endpoint' } }, 400)
         : f.response({ data: [{ b64_json: BASE64 }] }));
     assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
     assert.equal(f.calls.length, 2, 'chat 一发 + images 一发');
+});
+
+test('失败重试默认关：chat 404 只发一发，报错提示可打开开关', async t => {
+    const f = fixture(t);
+    f.respond(() => f.response('not found', 404));
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /默认只打一次请求/);
+    assert.equal(f.calls.length, 1, '每次只发一次生图请求');
+    assert.match(f.calls[0].url, /chat\/completions$/);
+});
+
+test('失败重试默认关：images 直连站 b64 被拒也只发一发，报错带说明', async t => {
+    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations' });
+    f.respond(() => f.response({ error: { message: 'Unsupported parameter: response_format' } }, 400));
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /未自动改发重试/);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].body.response_format, 'b64_json');
+});
+
+test('失败重试开着也只多一发：chat 404 → images 再拒 b64 → 不发第三发', async t => {
+    const f = fixture(t, { genRetryOnce: true });
+    f.respond(call => /chat\/completions/.test(call.url)
+        ? f.response('not found', 404)
+        : f.response({ error: { message: 'Unsupported parameter: response_format' } }, 400));
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /400/);
+    assert.equal(f.calls.length, 2, '换通道那一发已用掉重试预算');
+});
+
+test('失败重试开着：网络层失败仍不自动补发（可能已扣费）', async t => {
+    const f = fixture(t, { genRetryOnce: true });
+    const called = [];
+    f.w.fetch = async url => { called.push(String(url)); throw new TypeError('Failed to fetch'); };
+    globalThis.fetch = f.w.fetch;
+    await assert.rejects(f.debug.genImageUnified('a cat'), /未自动重试/);
+    assert.equal(called.length, 1, '连接中断不代表站点没生成，再打一发就是重复扣费');
 });

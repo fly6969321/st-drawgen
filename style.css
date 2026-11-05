@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.19 */
+/* 生图工坊 · DrawGen v1.8.20 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -119,6 +119,7 @@
     padding: 0;
 }
 .sdg-iconbtn:hover { background: var(--sdg-line); }
+#sdg-power.sdg-off { opacity: 0.45; }
 
 #sdg-panel-body {
     padding: 6px 12px 7px;

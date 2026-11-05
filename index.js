@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.19
+ *  生图工坊 · DrawGen v1.8.20
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -107,12 +107,16 @@
  *    默认 = 先 chat/completions，失败再退 images/generations（老行为）；
  *    chat = 只打 chat/completions；images = 只打 images/generations。
  *    有的站不支持 chat 端点（模型只在 images 端点，chat 会回 400），选 images 就不用每次先撞一次 400。
+ *  · v1.8.20 ①生图失败不再默认自动重发：新增「失败后自动重试一次」开关（默认关），
+ *    关着时每次点击只发一次生图请求、失败就报错（换通道兜底与 b64→url 改发都受它管，
+ *    打开后两种重发共享「最多再发一发」的预算；网络中断与超时永远不自动补发）。
+ *    ②插件总开关（启用生图工坊）从面板里挪到顶栏，显示「开 / 关」，点一下即切换。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.19";
+    const VERSION = "1.8.20";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -178,6 +182,7 @@
         grokSize: "1024x1024",
         genQuality: "",            // 画质参数：GPT 2.5 系 low/medium/high/xhigh/max；Grok low/medium/auto；留空不发送（随站点档案保存）
         genChannel: "auto",        // 生图通道：auto=先 chat 失败退 images | chat=只用 chat/completions | images=只用 images/generations（随站点档案保存）
+        genRetryOnce: false,       // 失败重试：默认关 = 每次只发一次生图请求；打开后失败最多自动重试一次（换通道兜底 / b64→url 共享同一次）
         genProxy: false,
         genTimeout: 300,
         imageKeepCount: 200,       // 只保留最新的 N 张本地图片（服务器文件 + 聊天引用），超出的旧图删掉；0 = 不清理
@@ -3079,10 +3084,13 @@
     }
     /* —— 生图统一请求（与 Tavo 生图工坊 v1.18.16 对齐） ——
        ① 主路径 chat/completions 多模态（尺寸 / 画质原样传）；地址直指 /images/generations 时跳过；
-       ② 兜底 images/generations（优先 b64_json 拿数据直接存本地；站点 400 拒绝该参数才改要 url 重试一次）；
+       ② 兜底 images/generations（优先 b64_json 拿数据直接存本地；站点 400 拒绝该参数、且「失败重试」开着才改要 url）；
        ③ 尺寸全角 × 归一化为半角 x（fate 等站点拒收全角）；
        ④ genTimeout 超时与「停止」按钮真正能掐断；超时/取消后不再补发，避免重复计费；
-       ⑤ 失败错误带 HTTP 状态码 + 站点返回的原话。
+       ⑤ 失败错误带 HTTP 状态码 + 站点返回的原话；
+       ⑥ 失败重试开关（genRetryOnce，默认关）：关着时任何失败都只发这一发请求；
+          打开后失败最多自动追加一发的预算（换通道兜底 / b64→url 两种重发共享），
+          网络层错误与超时永远不补发（可能已扣费）。
        酒馆后端代理（genProxy）只走 chat 通道，没有 images 兜底。 */
     function normalizeGenSize(v) { return String(v == null ? "" : v).trim().replace(/×/g, "x") || "1024x1024"; }
 
@@ -3211,6 +3219,7 @@
         let base = String(c.genEndpoint || "").trim().replace(/\/+$/, "");
         if (!base) throw new Error("请先填写生图 API 地址");
         const channel = String(c.genChannel || "auto");   /* auto | chat | images */
+        const retryOnce = !!c.genRetryOnce;               /* 失败重试开关（默认关） */
         /* images：只走 images 接口（地址直指 images 也算），不再先白打一次 chat */
         const imagesOnly = channel === "images" || /\/images\/generations$/.test(base);
         base = base.replace(/\/(images\/generations|chat\/completions)$/, "");
@@ -3222,11 +3231,14 @@
 
         /* ① 主路径：chat/completions */
         let lastErr = "";
-        /* 兜底只在「这个站的 chat 通道根本不通」时才走：接口不存在(404/405/501)、
-           参数不被接受(400)、网络层错误。鉴权(401/403)、限流(429)、服务端错(5xx)一律不退——
+        /* 换接口兜底只在「这个站的 chat 通道根本不通」时才走：接口不存在(404/405/501)、
+           参数不被接受(400)。鉴权(401/403)、限流(429)、服务端错(5xx)一律不退——
            退了也是再吃一次同样的错，还白添一次请求；200 但解析不出图更是已经计费了，
-           再发一次等于同一张图扣两回。内容被审核拒的 400 同理（见 isModerationBlock）。 */
+           再发一次等于同一张图扣两回。内容被审核拒的 400 同理（见 isModerationBlock）。
+           1.8.20 起还须过「失败重试」开关：关着时（默认）一律不走，只发这一次请求。 */
         let canFallback = false, charged = false, moderated = false, netErr = false;
+        let wouldFallback = false;                          /* 若无开关限制本来会退 images 的场景（报错文案用） */
+        let retryLeft = retryOnce ? 1 : 0;                  /* 本次失败重试预算：最多自动追加一发 */
         if (imagesOnly) {
             lastErr = "按地址直连 images 接口";
             canFallback = true;
@@ -3276,7 +3288,9 @@
                 const t = await resp.text();
                 lastErr = "chat 接口 " + siteErrorBrief(resp.status, t);
                 moderated = (resp.status === 400 || resp.status === 403) && isModerationBlock(t);
-                canFallback = channel !== "chat" && !moderated && (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 400);
+                wouldFallback = channel !== "chat" && !moderated && (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 400);
+                canFallback = wouldFallback && retryLeft > 0;
+                if (canFallback) retryLeft--;
             }
         } catch (e) {
             const ae = genAbortError(ctl); if (ae) { ctl.dispose(); throw ae; }
@@ -3299,11 +3313,13 @@
                 ? "（站点已返回 200，可能已计费，没有再试 images 接口以免重复扣费）"
                 : moderated
                     ? "（内容被站点审核拒了，没再试 images 接口：同一个提示词退过去也是一样被拒）"
-                    : channel === "chat"
-                        ? "（这个站点设的是「只用 chat/completions」，没有退 images；要让它退把生成通道改成默认）"
-                        : netErr
+                    : netErr
                         ? "（连接中断不代表站点没生成：可能已扣费，未自动重试；要重试请自己点重画）"
-                        : "（没再试 images 接口：这类错误退了也是同样结果）"));
+                        : channel === "chat"
+                            ? "（这个站点设的是「只用 chat/completions」，没有退 images；要让它退把生成通道改成默认）"
+                            : wouldFallback && !retryOnce
+                                ? "（默认只打一次请求，未自动重试；要自动重试请在设置里打开「失败重试」）"
+                                : "（没再试 images 接口：这类错误退了也是同样结果）"));
         }
         try {
             const headers = { "Content-Type": "application/json", "Accept": "*/*" };
@@ -3315,8 +3331,11 @@
             let why2 = "";
             if (!resp2.ok) why2 = await resp2.text();
             /* 先要图片数据：拿到数据就能直接上传存本地，不用下载、不受跨域影响。
-               站点明确 400 拒绝这个参数（肯定没计费）才改要 url 重试一次；200 后绝不补发。 */
-            if (resp2.status === 400 && /response_format/i.test(why2)) {
+               站点明确 400 拒绝这个参数（肯定没计费）、「失败重试」开着且还有预算，
+               才改要 url 重试；200 后绝不补发。 */
+            const b64Rejected = resp2.status === 400 && /response_format/i.test(why2);
+            if (b64Rejected && retryLeft > 0) {
+                retryLeft--;
                 log("站点不接受 b64_json，改用 url 重试");
                 resp2 = await fetch(base + "/images/generations", {
                     method: "POST", headers: headers, signal: ctl.signal,
@@ -3332,7 +3351,9 @@
                 throw new Error("images 接口响应未包含图片 / " + lastErr);
             }
             ctl.dispose();
-            throw new Error("images 接口 " + siteErrorBrief(resp2.status, why2) + " / " + lastErr);
+            throw new Error("images 接口 " + siteErrorBrief(resp2.status, why2)
+                + (b64Rejected && !retryOnce ? "（未自动改发重试；可在设置打开「失败重试」）" : "")
+                + " / " + lastErr);
         } catch (e) {
             ctl.dispose();
             const ae = genAbortError(ctl); if (ae) throw ae;
@@ -4817,6 +4838,15 @@
         save("theme", cfg().theme === "day" ? "night" : "day");
         applyTheme();
     }
+    /* 顶栏插件开关：按钮上显示当前状态（开 / 关），点一下切换 */
+    function syncPower() {
+        const btn = q("#sdg-power");
+        if (!btn) return;
+        const on = !!cfg().enabled;
+        btn.textContent = on ? "开" : "关";
+        btn.title = on ? "生图工坊已开启 · 点击关闭" : "生图工坊已关闭 · 点击开启";
+        btn.classList.toggle("sdg-off", !on);
+    }
 
     /* ============================================================
        界面：面板 HTML
@@ -4975,6 +5005,7 @@
             '<span class="sdg-title">🎨 生图工坊 <small>v' + VERSION + '</small></span>' +
             '<span class="sdg-head-r">' +
                 '<button type="button" id="sdg-theme" class="sdg-iconbtn">🌙</button>' +
+                '<button type="button" id="sdg-power" class="sdg-iconbtn"></button>' +
                 '<button type="button" id="sdg-panel-close" class="sdg-iconbtn">✕</button>' +
             '</span>' +
         '</div>' +
@@ -5011,6 +5042,7 @@
                         '<option value="chat"' + (genCh === "chat" ? " selected" : "") + '>只用 chat/completions</option>' +
                         '<option value="images"' + (genCh === "images" ? " selected" : "") + '>只用 images/generations</option>' +
                     '</select>') +
+                    chk("sdg-gen-retry", "genRetryOnce", "失败后自动重试一次") +
                     chk("sdg-gen-proxy", "genProxy", "走酒馆后端代理（绕跨域）") +
 
                     '<h5>自动化</h5>' +
@@ -5028,7 +5060,6 @@
                     '<div class="sdg-hint">生图超时或点「停止」不会补发。保留张数：只留最新的 N 张本地图片，超出的旧图连文件一起删；0 = 不清理。</div>' +
 
                     '<h5>插件</h5>' +
-                    chk("sdg-enabled", "enabled", "启用生图工坊") +
                     chk("sdg-show-ball", "showBall", "显示悬浮球") +
                 '</section>' +
 
@@ -5115,6 +5146,12 @@
         });
         q("#sdg-panel-close").addEventListener("click", function () { showPanel(false); });
         q("#sdg-theme").addEventListener("click", toggleTheme);
+        q("#sdg-power").addEventListener("click", function () {
+            save("enabled", !cfg().enabled);
+            syncPower();
+            syncDrawer();
+        });
+        syncPower();
         qa(".sdg-grip").forEach(function (b) {
             b.addEventListener("click", function (ev) {
                 ev.preventDefault(); ev.stopPropagation();
@@ -5170,6 +5207,7 @@
 
         /* 生图设置 */
         bindSite("gen");
+        bindChk("#sdg-gen-retry", "genRetryOnce");
         bindChk("#sdg-gen-proxy", "genProxy");
 
         /* 自动化 */
@@ -5202,7 +5240,6 @@
             if (String(v) !== String(ev.target.value)) ev.target.value = v;
         });
         numField("#sdg-gen-timeout", "genTimeout", 300, 30, null, null);
-        bindChk("#sdg-enabled", "enabled", function () { syncDrawer(); });
         bindChk("#sdg-show-ball", "showBall", function () { applyBallVisible(); syncDrawer(); });
 
         /* 画风 / 提取规则 / 角色锚点 预设 */

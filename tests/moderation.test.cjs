@@ -74,8 +74,8 @@ test('内容审核拒绝（400 moderation_blocked）只发一次，不再退 ima
     assert.match(debug.formatGenError(new Error(err)), /^生图失败 400（chat）：Your request was rejected/);
 });
 
-test('参数类 400 照旧退 images 兜底（chat 通道真不通的情况没被连坐）', async (t) => {
-    const { w, debug } = fixture(t, GPT);
+test('参数类 400 + 失败重试开着：退 images 兜底（chat 通道真不通的情况没被连坐）', async (t) => {
+    const { w, debug } = fixture(t, Object.assign({}, GPT, { genRetryOnce: true }));
     const calls = stub(w, [[400, PARAM_BODY], [200, JSON.stringify({ data: [{ b64_json: 'AAAA' }] })]]);
     const { out } = await gen(debug);
     assert.equal(calls.length, 2);
