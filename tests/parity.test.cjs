@@ -254,7 +254,7 @@ test('cancelling import changes nothing', t => {
     assert.equal(JSON.stringify(debug.getPresets('style')), before);
 });
 
-test('stylePackBuild exports only styles without keys', t => {
+test('stylePackBuild exports styles and public rules without keys', t => {
     const { debug } = fixture(t);
     const pack = debug.stylePackBuild();
     assert.equal(pack._fmt, 'drawgen-style-pack');

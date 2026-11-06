@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.21
+ *  生图工坊 · DrawGen v1.8.22
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -111,6 +111,8 @@
  *    关着时每次点击只发一次生图请求、失败就报错（换通道兜底与 b64→url 改发都受它管，
  *    打开后两种重发共享「最多再发一发」的预算；网络中断与超时永远不自动补发）。
  *    ②插件总开关（启用生图工坊）从面板里挪到顶栏，显示「开 / 关」，点一下即切换。
+ *  · v1.8.22 公共规则可编辑、单独导入导出并随画风包保存；六层标签支持空格、围栏及漏闭合；
+ *    自动生图按聊天、楼层、回复与正文去重，避免重复消息通知再次发起生成。失败重试开关保持原意。
  *  · v1.8.21 顶栏快捷键定稿：🌙 日夜图标 · 🎨 悬浮球图标按钮（点一下开/关，关了变暗）·
  *    插件总开关做成圆形滑动开关（与「分层提取」同款）；面板里的对应勾选框保留不撤，
  *    两处状态互相同步。
@@ -119,7 +121,7 @@
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.21";
+    const VERSION = "1.8.22";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -163,6 +165,7 @@
         extRules: "",
         extAnchors: "",
         anchorGuideOn: true,
+        anchorUsageGuide: "",      // 公共规则：留空沿用内置默认，所有角色锚点共用
         extProxy: false,
         requestTimeout: 0,
         retryOnce: true,
@@ -1448,6 +1451,17 @@
         return list[0];
     }
 
+    function getAnchorUsageGuide() {
+        const custom = cfg().anchorUsageGuide;
+        return (typeof custom === "string" ? custom.trim() : "") || DEFAULT_ANCHOR_GUIDE;
+    }
+    function refreshAnchorGuideUI() {
+        const editor = q("#sdg-anchor-guide");
+        if (editor) editor.value = getAnchorUsageGuide();
+        const enabled = q("#sdg-anchor-guide-on");
+        if (enabled) enabled.checked = cfg().anchorGuideOn !== false;
+    }
+
     /* ============================================================
        多站点（提取 / 生图各一套，可存多个随意切换）
        每个站点 = { id, name, endpoint, key, model, models[], size }
@@ -1683,13 +1697,17 @@
 
     /* ============================================================
        画风预设 JSON 导入 / 导出
-       · 导出：drawgen-style-pack 包，只含画风，不含 API 与密钥
+       · 导出：drawgen-style-pack 包，包含画风与公共规则，不含 API 与密钥
        · 导入：画风包（styles 数组）按名字合并；
          预设包（templates 数组 / ipe-image-pack 格式）的模板转画风，
          规则 / 系统提示 / 角色锚点各自归并；按名字合并不清空现有内容
        ============================================================ */
     const STYLE_PACK_FMT = "drawgen-style-pack";
+    const ANCHOR_GUIDE_PACK_FMT = "drawgen-anchor-guide";
     const LEGACY_PACK_FMT = "ipe-image-pack";   /* 兼容旧版预设包导出格式的识别标记 */
+    function anchorGuidePackBuild() {
+        return { _fmt: ANCHOR_GUIDE_PACK_FMT, version: VERSION, anchorGuide: getAnchorUsageGuide() };
+    }
     function stylePackBuild() {
         const styles = getPresets("style").map(function (p) {
             return { name: p.name || "未命名", fixed: p.fixed || "", postfix: p.postfix || "" };
@@ -1697,21 +1715,22 @@
         const d = new Date();
         const p2 = function (n) { return String(n).padStart(2, "0"); };
         const stamp = "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
-        return { _fmt: STYLE_PACK_FMT, version: VERSION, exportedAt: stamp, styles: styles };
+        return { _fmt: STYLE_PACK_FMT, version: VERSION, exportedAt: stamp, styles: styles, anchorGuide: getAnchorUsageGuide() };
     }
-    function styleExportFile() {
+    function styleExportFile(onlyGuide) {
         try {
-            const pack = stylePackBuild();
+            onlyGuide = onlyGuide === true;
+            const pack = onlyGuide ? anchorGuidePackBuild() : stylePackBuild();
             const d = new Date();
             const p2 = function (n) { return String(n).padStart(2, "0"); };
             const stamp = "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
             const blob = new Blob([JSON.stringify(pack, null, 2)], { type: "application/json" });
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
-            a.href = url; a.download = "drawgen-styles-" + stamp + ".json";
+            a.href = url; a.download = (onlyGuide ? "drawgen-anchor-guide-" : "drawgen-styles-") + stamp + ".json";
             document.body.appendChild(a); a.click(); a.remove();
             setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
-            setStatus("已导出画风 JSON ✓ 共 " + pack.styles.length + " 套", C_OK);
+            setStatus(onlyGuide ? "已导出公共规则 JSON ✓" : "已导出画风与公共规则 JSON ✓ 共 " + pack.styles.length + " 套画风", C_OK);
         } catch (e) {
             setStatus("导出失败：" + (e && e.message || e), C_ERR);
         }
@@ -1774,8 +1793,15 @@
     function packPlan(text) {
         let parsed;
         try { parsed = JSON.parse(String(text || "")); } catch (e) { throw new Error("这不是合法 JSON"); }
-        const plan = { styles: [], rules: [], sys: [], anchors: [], kind: "style" };
-        if (parsed && Array.isArray(parsed.styles)) {
+        const plan = { styles: [], rules: [], sys: [], anchors: [], kind: "style", anchorGuide: "" };
+        if (parsed && parsed.anchorGuide != null && typeof parsed.anchorGuide !== "string") {
+            throw new Error("公共规则必须是文本");
+        }
+        if (parsed && typeof parsed.anchorGuide === "string") plan.anchorGuide = parsed.anchorGuide.trim();
+        if (parsed && parsed._fmt === ANCHOR_GUIDE_PACK_FMT) {
+            if (!plan.anchorGuide) throw new Error("公共规则文件中没有可用的规则文本");
+            plan.kind = "guide";
+        } else if (parsed && Array.isArray(parsed.styles)) {
             plan.kind = "style";
             plan.styles = parsed.styles;
         } else if (parsed && (parsed._fmt === LEGACY_PACK_FMT || (Array.isArray(parsed.templates) && !Array.isArray(parsed.styles)))) {
@@ -1791,12 +1817,14 @@
             plan.kind = "style";
             plan.styles = [parsed];
         } else {
-            throw new Error("不是可识别的预设包（画风包需要 styles 数组，预设包需要 templates 数组）");
+            throw new Error("不是可识别的预设包（请选择画风、预设或公共规则 JSON）");
         }
         return plan;
     }
     function packImportText(text) {
         const plan = packPlan(text);
+        /* 旧包的空公共规则表示未携带自定义内容，不能清空现有规则。 */
+        const guideChanged = !!plan.anchorGuide && plan.anchorGuide !== getAnchorUsageGuide();
         /* 合并计划：每组 {label, list(现有), incoming(清洗后), key(名字字段), valueFields}，算出新增/覆盖/相同 */
         const groups = [];
         const mkGroup = function (label, current, raw, cleaner, keyField, valueFields, jsonKey, idKey, flatMap) {
@@ -1805,7 +1833,7 @@
             });
             return { label: label, list: current, incoming: inc, key: keyField, fields: valueFields, jsonKey: jsonKey, idKey: idKey, flat: flatMap, add: 0, rep: 0, same: 0 };
         };
-        groups.push(mkGroup("画风", getPresets("style"), plan.styles, plan.kind === "pack" ? packStyleItem : styleItemFromRaw, "name", ["fixed", "postfix"], PRESETS.style.jsonKey, PRESETS.style.idKey, PRESETS.style.fields));
+        if (plan.kind !== "guide") groups.push(mkGroup("画风", getPresets("style"), plan.styles, plan.kind === "pack" ? packStyleItem : styleItemFromRaw, "name", ["fixed", "postfix"], PRESETS.style.jsonKey, PRESETS.style.idKey, PRESETS.style.fields));
         if (plan.kind === "pack") {
             groups.push(mkGroup("提取规则", getPresets("rules"), plan.rules, packRuleItem, "name", ["text"], PRESETS.rules.jsonKey, PRESETS.rules.idKey, PRESETS.rules.fields));
             groups.push(mkGroup("系统提示", getSystemPrompts(), plan.sys, packSysItem, "name", ["value"], "extSystemPromptsJson", "extActiveSystemPrompt", null));
@@ -1823,16 +1851,17 @@
             totalAdd += g.add; totalRep += g.rep; totalSame += g.same;
         });
         const usable = groups.reduce(function (n, g) { return n + g.incoming.length; }, 0);
-        if (!usable) { setStatus("包里没有可用的预设内容", C_WARN); return; }
-        if (totalAdd === 0 && totalRep === 0) { setStatus("文件里的画风和现有完全一致，什么都没变", C_OK); return; }
+        if (!usable && !plan.anchorGuide) { setStatus("包里没有可用的预设内容", C_WARN); return; }
+        if (totalAdd === 0 && totalRep === 0 && !guideChanged) { setStatus("文件里的预设和公共规则与现有一致，什么都没变", C_OK); return; }
 
         const lines = ["将导入预设包，按名字合并："];
         groups.forEach(function (g) {
             if (!g.incoming.length) return;
             lines.push("· " + g.label + "：新增 " + g.add + " / 覆盖 " + g.rep + (g.same ? " / 相同 " + g.same : ""));
         });
+        if (guideChanged) lines.push("· 公共规则：替换当前规则（对所有角色锚点生效）");
         lines.push("同名内容不同的会被覆盖，新增的追加，不会清空现有内容。继续吗？");
-        if (totalAdd > 0 || totalRep > 0) {
+        if (totalAdd > 0 || totalRep > 0 || guideChanged) {
             const msg = totalRep > 0
                 ? ("将覆盖 " + totalRep + " 个同名预设，另新增 " + totalAdd + " 个。继续吗？（取消 = 什么都不动）\n\n" + lines.join("\n"))
                 : lines.join("\n");
@@ -1856,6 +1885,10 @@
             });
             saveCritical(g.jsonKey, JSON.stringify(g.list));
         });
+        if (guideChanged) {
+            saveCritical("anchorUsageGuide", plan.anchorGuide === DEFAULT_ANCHOR_GUIDE ? "" : plan.anchorGuide);
+            refreshAnchorGuideUI();
+        }
         /* 刷新界面：画风/规则/锚点走预设行；系统提示重建下拉 */
         ["style", "rules", "anchors"].forEach(function (k) { try { refreshPresetUI(k); } catch (e) {} });
         try {
@@ -1868,9 +1901,11 @@
                 if (sysVal) { const p = getSystemPrompts().find(function (x) { return x.id === sysSel.value; }); sysVal.value = p ? p.value : ""; }
             }
         } catch (e) {}
-        const summary = groups.filter(function (g) { return g.incoming.length; }).map(function (g) {
+        const summaryParts = groups.filter(function (g) { return g.incoming.length; }).map(function (g) {
             return g.label + " 新增" + g.add + "/覆盖" + g.rep;
-        }).join("，");
+        });
+        if (guideChanged) summaryParts.push("公共规则已更新");
+        const summary = summaryParts.join("，");
         setStatus("导入完成 ✓ " + summary, C_OK);
         toast("✅ 导入完成：" + summary, true);
     }
@@ -1978,10 +2013,14 @@
     }
     /* 副AI回复 → 各层；一个标签都没有就返回 null（整段兜底） */
     function parseLayers(txt) {
-        txt = String(txt || "");
+        txt = String(txt || "").trim();
+        const fenced = txt.match(/^(`{3,}|~{3,})[a-zA-Z0-9_-]*[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*\1[ \t]*$/);
+        if (fenced) txt = fenced[2].trim();
+        const nextLayer = "(?=<\\s*(?:" + LAYERS.join("|") + ")\\s*>)";
         const out = {}; let n = 0;
         LAYERS.forEach(function (l) {
-            const m = txt.match(new RegExp("<" + l + "\\s*>([\\s\\S]*?)<\\/" + l + "\\s*>", "i"));
+            /* 漏闭标签时只读到下一层，避免把后面的服装、动作等一起吞进本层。 */
+            const m = txt.match(new RegExp("<\\s*" + l + "\\s*>([\\s\\S]*?)(?:<\\s*\\/\\s*" + l + "\\s*>|" + nextLayer + "|$)", "i"));
             if (m) { out[l] = String(m[1] || "").trim(); n++; }
         });
         return n ? out : null;
@@ -2651,7 +2690,7 @@
         let user = "";
         const anchors = String(c.extAnchors || "").trim();
         if (anchors) {
-            if (c.anchorGuideOn !== false) user += "【角色锚点使用规则】\n" + DEFAULT_ANCHOR_GUIDE + "\n\n";
+            if (c.anchorGuideOn !== false) user += "【角色锚点使用规则】\n" + getAnchorUsageGuide() + "\n\n";
             user += "【角色外貌锚点】\n" + anchors + "\n\n";
         }
         const rules = String(c.extRules || "").trim();
@@ -4606,6 +4645,9 @@
                 .replace(/^image[#＃]{2,}/i, "").replace(/[#＃]{2,}$/, "").trim();
     }
 
+    /* 同一消息可能收到多次完成通知。生成锁只挡并发，不能挡解锁后的重复自动生图。
+       按聊天 / 消息对象 / swipe 记住正文；弱引用随聊天释放，不写入聊天存档。 */
+    const autoReceivedInputs = new WeakMap();
     function onMsgReceived(idx) {
         if (!cfg().enabled) return;
         try {
@@ -4627,8 +4669,21 @@
                不然重roll出来的新楼自己带着框、还跳过提取直接生图。
                自动提取关着、或剥不干净时保留老行为：模型写的标记直接逐个生图。 */
             const tags = findAllTags(msg.mes);
+            const stripped = cfg().autoExtract ? stripImageTag(msg.mes) : msg.mes;
+            const inputKey = swipeKey(msg) + (cfg().autoExtract ? ":extract" : ":markers");
+            const inputText = String(stripped || "").trim();
+            let messages = autoReceivedInputs.get(chat);
+            if (!messages) { messages = new WeakMap(); autoReceivedInputs.set(chat, messages); }
+            let inputs = messages.get(msg);
+            if (!inputs) { inputs = new Map(); messages.set(msg, inputs); }
+            if (inputs.get(inputKey) === inputText) {
+                log("跳过重复自动消息通知", "楼号=" + i, "swipe=" + swipeKey(msg));
+                return;
+            }
+            /* 先记再异步处理，等待响应和失败之后的重复通知都不能另起一次生成。
+               手动操作和显式提取重试不经过此入口，因此仍可正常执行。 */
+            inputs.set(inputKey, inputText);
             if (tags.length) {
-                const stripped = cfg().autoExtract ? stripImageTag(msg.mes) : msg.mes;
                 if (cfg().autoExtract && String(stripped).trim() !== String(msg.mes).trim() && !findAllTags(stripped).length) {
                     msg.mes = String(stripped);
                     syncSwipe(msg);
@@ -5091,12 +5146,12 @@
                     /* —— 画风：跟提取规则分开的独立分区，可存多个 —— */
                     '<h5>🎨 画风（管生图风格）</h5>' +
                     presetRowHTML("style", "画风预设",
-                        '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风包 / 预设包）">⬆</button>' +
-                        '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风 JSON">⬇</button>' +
+                        '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风 / 预设 / 公共规则）">⬆</button>' +
+                        '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风与公共规则 JSON">⬇</button>' +
                         '<input type="file" id="sdg-style-file" accept=".json,application/json" style="position:absolute;left:-9999px;width:1px;height:1px">') +
                     bigField("sdg-gen-fixed", "genFixedPrompt", 3, "例：Korean semi-realistic anime, ultra-detailed digital painting…", "风格词（拼在描述前）") +
                     bigField("sdg-gen-postfix", "genPostfixPrompt", 2, "例：masterpiece, best quality", "后缀词（拼在描述后）") +
-                    '<div class="sdg-hint">画风只影响出图风格，不会发给副AI；跟下面的「提取规则」是两回事。预设行 ⬆ 导入 JSON（画风包 / 预设包）、⬇ 导出画风 JSON，可备份或分享画风（导出只含画风，不含 API 与密钥）</div>' +
+                    '<div class="sdg-hint">画风只影响出图风格，不会发给副AI；跟下面的「提取规则」是两回事。预设行 ⬆ 导入 JSON、⬇ 导出画风与公共规则，可备份或分享（不含角色锚点、API 与密钥）。公共规则也可在提取页单独导出。</div>' +
 
                     '<h5>📝 提取规则（管副AI怎么写描述）</h5>' +
                     siteRowHTML("ext") +
@@ -5110,6 +5165,16 @@
                     bigField("sdg-rules", "extRules", 3, "给副AI的额外要求，例：只写可见画面、不要心理活动、镜头别太远……", "提取规则") +
                     presetRowHTML("anchors", "角色锚点预设") +
                     field("角色锚点", textArea("sdg-anchors", "extAnchors", 3, "角色名：外貌描述……")) +
+                    '<details class="sdg-anchor-guide"><summary>公共规则（所有角色锚点共用）</summary>' +
+                        chk("sdg-anchor-guide-on", "anchorGuideOn", "启用公共规则") +
+                        bigField("sdg-anchor-guide", "anchorUsageGuide", 5, "留空使用默认规则", "公共规则") +
+                        '<div class="sdg-hint">有角色锚点时随提取请求发送；修改自动保存，留空使用默认规则。</div>' +
+                        '<div class="sdg-btns">' +
+                            '<button type="button" id="sdg-anchor-guide-reset">恢复默认</button>' +
+                            '<button type="button" id="sdg-anchor-guide-import" title="导入公共规则或预设 JSON">导入 JSON</button>' +
+                            '<button type="button" id="sdg-anchor-guide-export">导出公共规则</button>' +
+                        '</div>' +
+                    '</details>' +
                     field("注入模板", textArea("sdg-template", "template", 2, DEFAULT_TEMPLATE)) +
                     '<div class="sdg-hint">默认 image###{Description}###　分层可用 {Camera} {Env} {Mood} {Chars} {Outfit} {Pose}</div>' +
                     chk("sdg-ext-proxy", "extProxy", "走酒馆后端代理") +
@@ -5263,6 +5328,16 @@
 
         /* 提取设置 */
         bindSite("ext");
+        q("#sdg-anchor-guide").addEventListener("input", function (ev) { save("anchorUsageGuide", ev.target.value); });
+        bindChk("#sdg-anchor-guide-on", "anchorGuideOn");
+        q("#sdg-anchor-guide-reset").addEventListener("click", function () {
+            saveCritical("anchorUsageGuide", "");
+            refreshAnchorGuideUI();
+            setStatus("公共规则已恢复默认 ✓", C_OK);
+        });
+        q("#sdg-anchor-guide-import").addEventListener("click", stylePickAndImport);
+        q("#sdg-anchor-guide-export").addEventListener("click", function () { styleExportFile(true); });
+        refreshAnchorGuideUI();
         bindText("#sdg-template", "template");
         bindChk("#sdg-ext-proxy", "extProxy");
         bindChk("#sdg-retry", "retryOnce");
@@ -5652,7 +5727,7 @@
             injectDescToMessage, reinjectDescToMessage, renderFloorImage, renderAllImages,
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
-            imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts,
+            imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts, getAnchorUsageGuide, anchorGuidePackBuild,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
             genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone, healRecoveredUrl, healChatRecoveredRefs, applyKeepCutoff, sweepExternalLinks, replaceGalleryRef,
             parseChatResponse, callSubAI, runExtract, onStop, persistChat, generateForFloor, onRegenFloor,

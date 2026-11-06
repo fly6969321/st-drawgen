@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.21 */
+/* 生图工坊 · DrawGen v1.8.22 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -203,6 +203,14 @@
 
 .sdg-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .sdg-hint { font-size: 11px; color: var(--sdg-fg2); }
+.sdg-anchor-guide {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--sdg-line);
+    border-radius: 6px;
+}
+.sdg-anchor-guide > summary { cursor: pointer; color: var(--sdg-fg); }
+.sdg-anchor-guide[open] > summary { margin-bottom: 8px; }
 
 /* —— 分层工作区 —— */
 #sdg-layers {

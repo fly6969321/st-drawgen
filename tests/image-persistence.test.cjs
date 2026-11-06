@@ -3,7 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 const { JSDOM, VirtualConsole } = require('jsdom');
-const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8')
+    .replace('window.__sdgDebug = {', 'window.__sdgDebug = { testGenConnection,');
 const BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jNioAAAAASUVORK5CYII=';
 const DATA = 'data:image/png;base64,' + BASE64;
 const SIGNED = 'https://cdn.test/image.png?token=a%2Bb&expires=123&sig=x%2Fy%3D';
@@ -38,8 +39,8 @@ function fixture(t, overrides = {}) {
     let respond = () => response({ choices: [{ message: { content: '![](' + SIGNED + ')' } }] });
     w.fetch = async (url, options = {}) => {
         const u = String(url);
-        const generation = /^https:\/\/images\.test\/v1\/(chat\/completions|images\/generations)$/.test(u);
-        if (generation) { const call = { url: u, body: JSON.parse(options.body) }; calls.push(call); return respond(call); }
+        const generation = /^https:\/\/images\.test\/v1\/(chat\/completions|images\/generations)$/.test(u) || u === '/api/backends/chat-completions/generate';
+        if (generation) { const call = { url: u, body: JSON.parse(options.body), signal: options.signal }; calls.push(call); return respond(call); }
         if (u === SIGNED) {
             downloads++;
             if (!downloadOk) throw new TypeError('Failed to fetch');   // 跨域被拦就是这个样子
@@ -260,6 +261,7 @@ test('只存了外链会后台重试补存：下载恢复后把聊天里的外�
     assert.equal(f.debug.getImage(f.msg, 0), LOCAL, '外链被原地换成本地路径');
     const saved = JSON.parse(f.saves.at(-1))[0];
     assert.equal(saved.extra.sdg_gal['0']['0'].list.at(-1), LOCAL, '补存后落盘');
+    assert.equal(f.calls.length, 1, '后台下载和上传补存不能再发付费生成请求');
 });
 
 test('打开聊天时扫尾：还能打开的旧外链被补存成本地路径', async t => {
@@ -271,6 +273,7 @@ test('打开聊天时扫尾：还能打开的旧外链被补存成本地路径',
     assert.equal(f.debug.getImage(f.msg, 0), LOCAL, '原地换成本地路径');
     assert.equal(f.uploads(), 1);
     assert.ok(f.saves.length > 0, '补存后落盘');
+    assert.equal(f.calls.length, 0, '旧外链扫尾只下载和上传，不重新生成图片');
 });
 
 test('扫尾失败的外链：引用不动，且不再立刻重试', async t => {
@@ -353,4 +356,45 @@ test('失败重试开着：网络层失败仍不自动补发（可能已扣费�
     globalThis.fetch = f.w.fetch;
     await assert.rejects(f.debug.genImageUnified('a cat'), /未自动重试/);
     assert.equal(called.length, 1, '连接中断不代表站点没生成，再打一发就是重复扣费');
+});
+
+test('生图超时在重试开关关闭或开启时都只发一次付费请求', async t => {
+    for (const genRetryOnce of [false, true]) {
+        const f = fixture(t, { genRetryOnce });
+        f.respond(call => new Promise((resolve, reject) => {
+            call.signal.addEventListener('abort', () => reject(new f.w.DOMException('aborted', 'AbortError')), { once: true });
+        }));
+        const rejected = assert.rejects(f.debug.genImageUnified('a cat'), /超时/);
+        await f.runAllTimers();
+        await rejected;
+        assert.equal(f.calls.length, 1, '超时不能自动补发');
+        assert.equal(f.uploads(), 0);
+    }
+});
+
+test('关闭失败重试：酒馆代理通道成功或报错都只有一次生成调用', async t => {
+    const success = fixture(t, { genProxy: true, genRetryOnce: false });
+    success.respond(() => success.response({ choices: [{ message: { content: '![](' + DATA + ')' } }] }));
+    assert.equal((await success.debug.genImageUnified('a cat')).image, DATA);
+    assert.equal(success.calls.length, 1);
+    assert.equal(success.calls[0].url, '/api/backends/chat-completions/generate');
+
+    const failure = fixture(t, { genProxy: true, genRetryOnce: false });
+    failure.respond(() => failure.response('not found', 404));
+    await assert.rejects(failure.debug.genImageUnified('a cat'), /404/);
+    assert.equal(failure.calls.length, 1, '代理报错也不转直连生成');
+});
+
+test('测试连接按钮只检查 models；代理配置检查不发生成请求', async t => {
+    const direct = fixture(t), checked = [];
+    direct.w.fetch = async (url, options = {}) => {
+        checked.push({ url: String(url), method: options.method || 'GET', body: options.body });
+        return direct.response({ data: [] });
+    };
+    await direct.debug.testGenConnection();
+    assert.deepEqual(checked, [{ url: 'https://images.test/v1/models', method: 'GET', body: undefined }]);
+    const proxy = fixture(t, { genProxy: true });
+    await proxy.debug.testGenConnection();
+    assert.equal(proxy.calls.length, 0);
+    assert.equal(proxy.uploads(), 0);
 });
