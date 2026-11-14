@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.22
+ *  生图工坊 · DrawGen v1.8.23
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -116,12 +116,14 @@
  *  · v1.8.21 顶栏快捷键定稿：🌙 日夜图标 · 🎨 悬浮球图标按钮（点一下开/关，关了变暗）·
  *    插件总开关做成圆形滑动开关（与「分层提取」同款）；面板里的对应勾选框保留不撤，
  *    两处状态互相同步。
+ *  · v1.8.23 提取站点新增接口「Vertex 直连」：配置照酒馆 API 连接页的 Google Vertex AI
+ *    （认证模式 / 区域 / 项目 ID / 模型），请求走酒馆自己的 Vertex 通道，密钥用酒馆里存的那把。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.22";
+    const VERSION = "1.8.23";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -158,6 +160,8 @@
         tab: "gen",                 // 面板当前页签 gen | ext
         // —— 提取（副AI）——
         extEndpoint: "", extKey: "", extModel: "",
+        extApi: "openai",           // 提取站点接口：openai = OpenAI 兼容 | vertex = Vertex 直连（走酒馆自己的 Vertex 通道，密钥用酒馆里存的）
+        extVxAuth: "express", extVxRegion: "us-central1", extVxProject: "", extVxModel: "",
         extProfilesJson: "", extProfileId: "",
         genProfilesJson: "", genProfileId: "",
         extSystemPromptsJson: "",
@@ -1468,9 +1472,15 @@
        当前站点的值同时写进老的扁平字段（extEndpoint 等），下游代码不用改
        ============================================================ */
     const PROF_FIELDS = {
-        ext: { endpoint: "extEndpoint", key: "extKey", model: "extModel" },
+        ext: { endpoint: "extEndpoint", key: "extKey", model: "extModel", api: "extApi", vxAuth: "extVxAuth", vxRegion: "extVxRegion", vxProject: "extVxProject", vxModel: "extVxModel" },
         gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize", quality: "genQuality", channel: "genChannel" }
     };
+    /* 提取站点选了「Vertex 直连」时，模型名和模型列表各存一份（vxModel / vxModels），
+       和 OpenAI 兼容那份互不覆盖 —— 接口来回切，两边填过的都还在。 */
+    function isVertexExt() { return cfg().extApi === "vertex"; }
+    function modelField(kind) { return kind === "ext" && isVertexExt() ? "vxModel" : "model"; }
+    function modelsField(kind) { return kind === "ext" && isVertexExt() ? "vxModels" : "models"; }
+    function curModel(kind) { return String(cfg()[PROF_FIELDS[kind][modelField(kind)]] || ""); }
     function profJsonKey(kind) { return kind === "gen" ? "genProfilesJson" : "extProfilesJson"; }
     function profIdKey(kind) { return kind === "gen" ? "genProfileId" : "extProfileId"; }
     function newId() { return "s" + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36); }
@@ -1512,8 +1522,85 @@
     }
     function setProfileModels(kind, models) {
         const list = getProfiles(kind), cur = activeProfile(kind);
-        for (const p of list) if (p.id === cur.id) p.models = models.slice(0, 400);
+        for (const p of list) if (p.id === cur.id) p[modelsField(kind)] = models.slice(0, 400);
         saveProfiles(kind, list);
+    }
+
+    /* ============================================================
+       Vertex 直连：配置照酒馆 API 连接页的 Google Vertex AI 那一套
+       （认证模式 / 区域 / 项目 ID / 模型），密钥不在插件里存，用酒馆里存好的那把。
+       ============================================================ */
+    const VERTEX_REGIONS = ["global", "us-central1", "us-east1", "us-east4", "us-west1", "us-west2", "us-west3", "us-west4",
+        "europe-west1", "europe-west2", "europe-west3", "europe-west4", "europe-west6", "europe-central2",
+        "asia-northeast1", "asia-northeast3", "asia-southeast1", "asia-south1", "australia-southeast1"];
+    /* 酒馆当前的 Vertex 设置：先读设置对象，读不到再读连接页上的控件 */
+    function tavernVertex() {
+        let s = null;
+        try { s = ctx().chatCompletionSettings || null; } catch (e) {}
+        const pick = function (key, sel) {
+            if (s && s[key] != null && String(s[key]).trim()) return String(s[key]).trim();
+            const el = q(sel);
+            return el && el.value ? String(el.value).trim() : "";
+        };
+        return {
+            auth: pick("vertexai_auth_mode", "#vertexai_auth_mode") === "full" ? "full" : "express",
+            region: pick("vertexai_region", "#vertexai_region") || "us-central1",
+            project: pick("vertexai_express_project_id", "#vertexai_express_project_id"),
+            model: pick("vertexai_model", "#model_vertexai_select")
+        };
+    }
+    /* 酒馆连接页那个 Vertex 模型下拉里的全部模型 */
+    function tavernVertexModels() {
+        const out = [];
+        qa("#model_vertexai_select option").forEach(function (o) {
+            const v = String(o.value || "").trim();
+            if (v && out.indexOf(v) < 0) out.push(v);
+        });
+        return out;
+    }
+    /* 站点第一次切到 Vertex：把酒馆当前的 Vertex 配置抄进这个站点（只抄一次，之后她改什么就是什么） */
+    function seedVertexProfile() {
+        const list = getProfiles("ext"), cur = activeProfile("ext");
+        if (cur.vxSeeded) return;
+        const t = tavernVertex(), models = tavernVertexModels();
+        for (const p of list) {
+            if (p.id !== cur.id) continue;
+            p.vxSeeded = true;
+            p.vxAuth = t.auth; p.vxRegion = t.region; p.vxProject = t.project; p.vxModel = t.model;
+            p.vxModels = models;
+            applyProfile("ext", p);
+        }
+        saveProfiles("ext", list);
+    }
+    function vertexRequestBody(messages, temperature) {
+        const c = cfg();
+        return {
+            chat_completion_source: "vertexai",
+            vertexai_auth_mode: c.extVxAuth === "full" ? "full" : "express",
+            vertexai_region: String(c.extVxRegion || "").trim() || "us-central1",
+            vertexai_express_project_id: String(c.extVxProject || "").trim(),
+            model: String(c.extVxModel || "").trim(),
+            messages: messages,
+            temperature: temperature,
+            use_sysprompt: true,
+            reasoning_effort: "auto",
+            include_reasoning: false,
+            stream: false
+        };
+    }
+    /* 报错一律：状态码在最前 + 谷歌原话。酒馆后端把谷歌的错误统一包成 500，真状态码在 error.code 里 */
+    function vertexErrorText(status, raw) {
+        let d = safeJson(raw, null);
+        if (Array.isArray(d)) d = d[0];
+        const e = d && d.error;
+        if (e && typeof e === "object") {
+            return "Vertex 报错 " + (e.code || status) + "：" + String(e.message || "").slice(0, 300) + (e.status ? "（" + e.status + "）" : "");
+        }
+        if (d && typeof d.message === "string" && d.message) {
+            const noKey = /API key is required|Service Account JSON is required/i.test(d.message);
+            return "Vertex 报错 " + status + "：" + d.message + (noKey ? "（酒馆 API 连接页里还没存 Vertex 密钥）" : "");
+        }
+        return "Vertex 报错 " + status + "：" + String(raw || "").slice(0, 220);
     }
     function switchProfile(kind, id) {
         const list = getProfiles(kind);
@@ -2741,8 +2828,14 @@
 
     async function callSubAI(text, supplement, layerOpts) {
         const c = cfg();
-        if (!c.extEndpoint) throw new Error("请先配置提取 API 地址");
-        if (!c.extModel) throw new Error("请先选择提取模型");
+        const vertex = isVertexExt();
+        if (vertex) {
+            if (!String(c.extVxModel || "").trim()) throw new Error("请先选择 Vertex 模型");
+            if (!(ctx() && typeof ctx().getRequestHeaders === "function")) throw new Error("这个酒馆版本用不了 Vertex 直连");
+        } else {
+            if (!c.extEndpoint) throw new Error("请先配置提取 API 地址");
+            if (!c.extModel) throw new Error("请先选择提取模型");
+        }
 
         const abortReq = {
             controller: typeof AbortController !== "undefined" ? new AbortController() : null,
@@ -2764,7 +2857,12 @@
         };
 
         let url, headers, reqBody;
-        if (c.extProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
+        if (vertex) {
+            /* Vertex 直连：发给酒馆自己的 Vertex 通道，和主聊天选 Google Vertex AI 时是同一条路 */
+            url = "/api/backends/chat-completions/generate";
+            headers = ctx().getRequestHeaders();
+            reqBody = vertexRequestBody(body.messages, body.temperature);
+        } else if (c.extProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
             url = "/api/backends/chat-completions/generate";
             headers = ctx().getRequestHeaders();
             reqBody = {
@@ -2803,13 +2901,15 @@
             extAborts.delete(abortReq);
         }
 
-        if (!res.ok) throw new Error("API " + res.status + "：" + raw.slice(0, 220));
+        if (!res.ok) throw new Error(vertex ? vertexErrorText(res.status, raw) : "API " + res.status + "：" + raw.slice(0, 220));
 
         const data = safeJson(raw, null);
         if (!data) throw new Error("API 返回不是 JSON：" + raw.slice(0, 180));
 
         const out = parseChatResponse(data);
         if (out) return out;
+        /* 谷歌没给正文（被拦 / 空回复）时，酒馆后端回的是 200 + error.message */
+        if (vertex && data.error && data.error.message) throw new Error("Vertex：" + String(data.error.message).slice(0, 300));
 
         let finish = "", hadReasoning = false;
         try {
@@ -5053,7 +5153,7 @@
             '<select id="' + pre + '-model-sel"></select>' +
             '<button type="button" id="' + pre + '-model-edit" class="sdg-minibtn" title="手动输入">✎</button>' +
         '</div>' +
-        '<input id="' + pre + '-model" type="text" class="sdg-model-input" placeholder="手动填模型名" value="' + esc(cfg()[kind === "gen" ? "genModel" : "extModel"]) + '">') +
+        '<input id="' + pre + '-model" type="text" class="sdg-model-input" placeholder="手动填模型名" value="' + esc(curModel(kind)) + '">') +
         '<div class="sdg-btns"><button type="button" id="' + pre + '-fetch-models">拉取模型</button><button type="button" id="' + pre + '-test">' + (kind === "gen" ? "测试生图" : "测试连接") + '</button></div>';
     }
 
@@ -5155,8 +5255,18 @@
 
                     '<h5>📝 提取规则（管副AI怎么写描述）</h5>' +
                     siteRowHTML("ext") +
-                    field("API 地址", textInput("sdg-ext-endpoint", "extEndpoint", "https://api.xxx.com/v1")) +
-                    field("API Key", textInput("sdg-ext-key", "extKey", "", "password")) +
+                    field("接口", '<select id="sdg-ext-api"><option value="openai">OpenAI 兼容</option><option value="vertex">Vertex 直连</option></select>') +
+                    '<div id="sdg-ext-box-openai">' +
+                        field("API 地址", textInput("sdg-ext-endpoint", "extEndpoint", "https://api.xxx.com/v1")) +
+                        field("API Key", textInput("sdg-ext-key", "extKey", "", "password")) +
+                    '</div>' +
+                    '<div id="sdg-ext-box-vertex">' +
+                        field("认证模式", '<select id="sdg-ext-vx-auth"><option value="express">Express（API Key）</option><option value="full">Full（服务账号）</option></select>') +
+                        field("区域", '<input id="sdg-ext-vx-region" type="text" list="sdg-vx-regions" value="' + esc(cfg().extVxRegion) + '" placeholder="us-central1">' +
+                            '<datalist id="sdg-vx-regions">' + VERTEX_REGIONS.map(function (r) { return '<option value="' + r + '">'; }).join("") + '</datalist>') +
+                        '<div id="sdg-ext-vx-project-box">' + field("项目 ID", textInput("sdg-ext-vx-project", "extVxProject", "区域不是 us-central1 时要填")) + '</div>' +
+                        '<div class="sdg-hint">密钥用酒馆 API 连接页里存的 Vertex 那把</div>' +
+                    '</div>' +
                     modelRowHTML("ext") +
                     field("系统提示", '<select id="sdg-sys-select">' + sysOpts + '</select>') +
                     '<textarea id="sdg-sys-value" rows="4"></textarea>' +
@@ -5406,16 +5516,33 @@
             on("#sdg-gen-channel", "change", function (e) { saveProfileField("gen", "channel", e.target.value); setStatus("生成通道已改为：" + e.target.value, C_OK); });
         }
 
+        if (kind === "ext") {
+            on("#sdg-ext-api", "change", function (e) {
+                const v = e.target.value === "vertex" ? "vertex" : "openai";
+                saveProfileField("ext", "api", v);
+                if (v === "vertex") seedVertexProfile();
+                refreshSiteUI("ext");
+                setStatus("接口：" + (v === "vertex" ? "Vertex 直连" : "OpenAI 兼容"), C_OK);
+            });
+            on("#sdg-ext-vx-auth", "change", function (e) { saveProfileField("ext", "vxAuth", e.target.value === "full" ? "full" : "express"); refreshSiteUI("ext"); });
+            on("#sdg-ext-vx-region", "change", function (e) {
+                const v = String(e.target.value || "").trim() || "us-central1";
+                e.target.value = v;
+                saveProfileField("ext", "vxRegion", v);
+            });
+            on("#sdg-ext-vx-project", "change", function (e) { saveProfileField("ext", "vxProject", String(e.target.value || "").trim()); });
+        }
+
         /* 模型：下拉选中就存；✎ 切换手动输入框 */
         on(pre + "-model-sel", "change", function (e) {
             const v = e.target.value;
             if (v === "__manual__") { showModelInput(kind, true); return; }
-            saveProfileField(kind, "model", v);
+            saveProfileField(kind, modelField(kind), v);
             const inp = q(pre + "-model"); if (inp) inp.value = v;
             setStatus("模型：" + v, C_OK);
         });
         on(pre + "-model", "change", function (e) {
-            saveProfileField(kind, "model", e.target.value);
+            saveProfileField(kind, modelField(kind), e.target.value);
             renderModelSelect(kind);
         });
         on(pre + "-model-edit", "click", function () {
@@ -5444,7 +5571,17 @@
         const c = cfg();
         const ep = q(pre + "-endpoint"); if (ep) ep.value = c[kind === "gen" ? "genEndpoint" : "extEndpoint"] || "";
         const kk = q(pre + "-key"); if (kk) kk.value = c[kind === "gen" ? "genKey" : "extKey"] || "";
-        const mi = q(pre + "-model"); if (mi) mi.value = c[kind === "gen" ? "genModel" : "extModel"] || "";
+        const mi = q(pre + "-model"); if (mi) mi.value = curModel(kind);
+        if (kind === "ext") {
+            const vx = isVertexExt();
+            const api = q("#sdg-ext-api"); if (api) api.value = vx ? "vertex" : "openai";
+            const bo = q("#sdg-ext-box-openai"); if (bo) bo.style.display = vx ? "none" : "";
+            const bv = q("#sdg-ext-box-vertex"); if (bv) bv.style.display = vx ? "" : "none";
+            const au = q("#sdg-ext-vx-auth"); if (au) au.value = c.extVxAuth === "full" ? "full" : "express";
+            const rg = q("#sdg-ext-vx-region"); if (rg) rg.value = c.extVxRegion || "";
+            const pj = q("#sdg-ext-vx-project"); if (pj) pj.value = c.extVxProject || "";
+            const pb = q("#sdg-ext-vx-project-box"); if (pb) pb.style.display = c.extVxAuth === "full" ? "none" : "";
+        }
         if (kind === "gen") {
             const sz = q("#sdg-grok-size"); if (sz) sz.value = c.grokSize || "1024x1024";
             const ql = q("#sdg-gen-quality"); if (ql) ql.value = c.genQuality || "";
@@ -5455,8 +5592,8 @@
     function renderModelSelect(kind) {
         const sel = q((kind === "gen" ? "#sdg-gen" : "#sdg-ext") + "-model-sel");
         if (!sel) return;
-        const cur = String(cfg()[kind === "gen" ? "genModel" : "extModel"] || "");
-        const models = (activeProfile(kind).models || []).slice();
+        const cur = curModel(kind);
+        const models = (activeProfile(kind)[modelsField(kind)] || []).slice();
         if (cur && models.indexOf(cur) < 0) models.unshift(cur);
         let html = "";
         if (!models.length) html += '<option value="">（点「拉取模型」或 ✎ 手填）</option>';
@@ -5469,6 +5606,16 @@
     }
     async function fetchModels(kind) {
         const c = cfg();
+        if (kind === "ext" && isVertexExt()) {
+            /* Vertex 没有拉模型的接口，酒馆连接页那个下拉就是全部 */
+            const list = tavernVertexModels();
+            if (!list.length) { setStatus("没读到酒馆的 Vertex 模型，点 ✎ 手填", C_WARN); return; }
+            setProfileModels("ext", list);
+            if (!curModel("ext")) saveProfileField("ext", "vxModel", tavernVertex().model || list[0]);
+            refreshSiteUI("ext");
+            setStatus("已加载 " + list.length + " 个模型，下拉里选", C_OK);
+            return;
+        }
         const endpoint = kind === "gen" ? c.genEndpoint : c.extEndpoint;
         const key = kind === "gen" ? c.genKey : c.extKey;
         if (!endpoint) { setStatus("请先填写 API 地址", C_ERR); return; }
@@ -5509,6 +5656,26 @@
     }
     async function testExtConnection() {
         const c = cfg();
+        if (isVertexExt()) {
+            if (!String(c.extVxModel || "").trim()) { setStatus("请先选择 Vertex 模型", C_ERR); return; }
+            if (!(ctx() && typeof ctx().getRequestHeaders === "function")) { setStatus("这个酒馆版本用不了 Vertex 直连", C_ERR); return; }
+            setStatus("正在测试连接…", C_OK);
+            try {
+                const res = await fetchWithTimeout("/api/backends/chat-completions/generate", {
+                    method: "POST",
+                    headers: ctx().getRequestHeaders(),
+                    body: JSON.stringify(vertexRequestBody([{ role: "user", content: "Hi" }], 0.4))
+                }, Number(c.requestTimeout || 0) * 1000);
+                const raw = await res.text();
+                if (!res.ok) throw new Error(vertexErrorText(res.status, raw));
+                const data = safeJson(raw, null);
+                if (data && data.error && data.error.message && !parseChatResponse(data)) throw new Error("Vertex：" + String(data.error.message).slice(0, 300));
+                setStatus("连接成功 ✓", C_OK);
+            } catch (e) {
+                setStatus("连接失败：" + e.message, C_ERR);
+            }
+            return;
+        }
         if (!c.extEndpoint) { setStatus("请先填写 API 地址", C_ERR); return; }
         setStatus("正在测试连接…", C_OK);
         try {
@@ -5731,6 +5898,7 @@
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
             genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone, healRecoveredUrl, healChatRecoveredRefs, applyKeepCutoff, sweepExternalLinks, replaceGalleryRef,
             parseChatResponse, callSubAI, runExtract, onStop, persistChat, generateForFloor, onRegenFloor,
+            vertexRequestBody, vertexErrorText, tavernVertex, tavernVertexModels, fetchModels, testExtConnection,
             normalizeImageToDataUrl, persistGenImage, generateImage
         };
     }
