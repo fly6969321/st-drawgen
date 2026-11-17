@@ -186,6 +186,7 @@
         // —— 生图 ——
         genEndpoint: "", genKey: "", genModel: "",
         genFixedPrompt: "", genPostfixPrompt: "",
+        commonBlocksJson: "[]", activeCommonBlock: "", // 公共块：多份固定提示词，画风预设按 common 挂接
         stylesJson: "", styleId: "",     // 画风预设（可存多个随时切）
         rulesJson: "", rulesId: "",      // 提取规则预设
         anchorsJson: "", anchorsId: "",  // 角色锚点预设
@@ -1740,6 +1741,118 @@
             }).join("");
         }
         for (const f in P.inputs) { const el = q(P.inputs[f]); if (el) el.value = cfg()[P.fields[f]] || ""; }
+        if (kind === "style") refreshStyleCommonSelect();
+    }
+
+    /* ============================================================
+       公共块：画风共用的固定提示词。只参与最终拼装，不发给提取副 AI。
+       画风写了 {Common} 就按占位符放置；没写就接在画风后缀之后。
+       ============================================================ */
+    const COMMON_PH = "{Common}";
+    function getCommonBlocks() {
+        let list = safeJson(cfg().commonBlocksJson, []);
+        if (!Array.isArray(list)) return [];
+        return list.filter(function (x) { return x && typeof x === "object"; }).map(function (x, i) {
+            return { id: String(x.id || ("common_" + (i + 1))), name: String(x.name || ("公共块" + (i + 1))), value: String(x.value || "") };
+        });
+    }
+    function saveCommonBlocks(list, critical) {
+        const raw = JSON.stringify(Array.isArray(list) ? list : []);
+        if (critical) saveCritical("commonBlocksJson", raw); else save("commonBlocksJson", raw);
+    }
+    function getCommonBlock(id, list) {
+        if (!id) return null;
+        return (list || getCommonBlocks()).find(function (x) { return x.id === id; }) || null;
+    }
+    function activeCommonId() {
+        const list = getCommonBlocks();
+        if (!list.length) return "";
+        return getCommonBlock(cfg().activeCommonBlock, list) ? cfg().activeCommonBlock : list[0].id;
+    }
+    function normCommonWs(s) { return String(s || "").replace(/\s+/g, " ").trim(); }
+    function styleCommonText(style, fixed, postfix) {
+        const blk = getCommonBlock(style && style.common);
+        const txt = blk ? String(blk.value || "").replace(/^\s*\n|\s+$/g, "") : "";
+        if (!txt.trim()) return "";
+        const body = normCommonWs((String(fixed || "") + "\n" + String(postfix || "")).split(COMMON_PH).join(" "));
+        return body.indexOf(normCommonWs(txt)) >= 0 ? "" : txt;
+    }
+    function applyCommonPlaceholder(tpl, common) {
+        tpl = String(tpl == null ? "" : tpl);
+        if (tpl.indexOf(COMMON_PH) < 0) return tpl;
+        if (common) return tpl.split(COMMON_PH).join(common);
+        const lines = tpl.split("\n"), out = [];
+        for (const line of lines) {
+            if (line.indexOf(COMMON_PH) >= 0) {
+                const rest = line.split(COMMON_PH).join("");
+                if (!rest.trim() && lines.length > 1) continue;
+                out.push(rest);
+            } else out.push(line);
+        }
+        return out.join("\n");
+    }
+    function setStyleCommon(styleId, commonId) {
+        const list = getPresets("style");
+        for (const p of list) if (p.id === styleId) p.common = String(commonId || "");
+        saveCritical(PRESETS.style.jsonKey, JSON.stringify(list));
+    }
+    function setCommonValue(value) {
+        const list = getCommonBlocks(), id = activeCommonId();
+        for (const b of list) if (b.id === id) b.value = String(value || "");
+        saveCommonBlocks(list, false);
+    }
+    function setCommonName(value) {
+        const list = getCommonBlocks(), id = activeCommonId();
+        for (const b of list) if (b.id === id) b.name = String(value || "").trim() || "未命名公共块";
+        saveCommonBlocks(list, false);
+    }
+    function addCommonBlock() {
+        const list = getCommonBlocks();
+        const id = newId();
+        list.push({ id: id, name: "公共块" + (list.length + 1), value: "" });
+        saveCommonBlocks(list, true);
+        saveCritical("activeCommonBlock", id);
+        refreshCommonEditors();
+        return id;
+    }
+    function deleteCommonBlock(id) {
+        id = id || activeCommonId();
+        const list = getCommonBlocks(), blk = getCommonBlock(id, list);
+        if (!blk) return null;
+        const styles = getPresets("style"), affected = styles.filter(function (p) { return p.common === id; });
+        const msg = "删除公共块「" + blk.name + "」？" + (affected.length ? "\n挂着它的 " + affected.length + " 个画风会改为不挂。" : "");
+        if (!window.confirm(msg)) return null;
+        affected.forEach(function (p) { p.common = ""; });
+        saveCritical(PRESETS.style.jsonKey, JSON.stringify(styles));
+        saveCommonBlocks(list.filter(function (x) { return x.id !== id; }), true);
+        saveCritical("activeCommonBlock", "");
+        refreshCommonEditors();
+        setStatus("已删除公共块「" + blk.name + "」", C_OK);
+        return { removed: blk.name, affected: affected.map(function (p) { return p.name; }) };
+    }
+    function refreshStyleCommonSelect() {
+        const sel = q("#sdg-style-common");
+        if (!sel) return;
+        const style = activePreset("style"), list = getCommonBlocks();
+        const cur = style && getCommonBlock(style.common, list) ? style.common : "";
+        sel.innerHTML = '<option value="">（不挂）</option>' + list.map(function (b) {
+            return '<option value="' + esc(b.id) + '">' + esc(b.name || "未命名") + '</option>';
+        }).join("");
+        sel.value = cur;
+    }
+    function refreshCommonEditors() {
+        const list = getCommonBlocks(), id = activeCommonId(), cur = getCommonBlock(id, list);
+        const slot = q("#sdg-common-slot");
+        if (slot) {
+            slot.innerHTML = list.map(function (b) { return '<option value="' + esc(b.id) + '">' + esc(b.name || "未命名") + '</option>'; }).join("");
+            slot.value = id;
+            slot.disabled = !cur;
+        }
+        const name = q("#sdg-common-name"), text = q("#sdg-common-text"), del = q("#sdg-common-delete");
+        if (name) { name.disabled = !cur; if (name !== document.activeElement) name.value = cur ? cur.name : ""; }
+        if (text) { text.disabled = !cur; if (text !== document.activeElement) text.value = cur ? cur.value : ""; }
+        if (del) del.disabled = !cur;
+        refreshStyleCommonSelect();
     }
     function presetRowHTML(kind, title, extraBtns) {
         const P = PRESETS[kind], id = P.selId.slice(1);
@@ -1762,6 +1875,25 @@
             }
             refreshPresetUI(kind);
         }
+        const styleCommon = q("#sdg-style-common");
+        if (styleCommon) styleCommon.addEventListener("change", function (e) {
+            const style = activePreset("style");
+            if (style) setStyleCommon(style.id, e.target.value);
+        });
+        const commonSlot = q("#sdg-common-slot");
+        if (commonSlot) commonSlot.addEventListener("change", function (e) {
+            saveCritical("activeCommonBlock", e.target.value);
+            refreshCommonEditors();
+        });
+        const commonName = q("#sdg-common-name");
+        if (commonName) commonName.addEventListener("input", function (e) { setCommonName(e.target.value); refreshCommonEditors(); });
+        const commonText = q("#sdg-common-text");
+        if (commonText) commonText.addEventListener("input", function (e) { setCommonValue(e.target.value); });
+        const commonAdd = q("#sdg-common-add");
+        if (commonAdd) commonAdd.addEventListener("click", function () { addCommonBlock(); });
+        const commonDelete = q("#sdg-common-delete");
+        if (commonDelete) commonDelete.addEventListener("click", function () { deleteCommonBlock(); });
+        refreshCommonEditors();
         qa(".sdg-p-add").forEach(function (b) { b.addEventListener("click", function () { addPreset(b.getAttribute("data-k")); }); });
         qa(".sdg-p-ren").forEach(function (b) { b.addEventListener("click", function () { renamePreset(b.getAttribute("data-k")); }); });
         qa(".sdg-p-del").forEach(function (b) { b.addEventListener("click", function () { delPreset(b.getAttribute("data-k")); }); });
@@ -1796,13 +1928,20 @@
         return { _fmt: ANCHOR_GUIDE_PACK_FMT, version: VERSION, anchorGuide: getAnchorUsageGuide() };
     }
     function stylePackBuild() {
+        const blocks = getCommonBlocks(), used = {};
         const styles = getPresets("style").map(function (p) {
-            return { name: p.name || "未命名", fixed: p.fixed || "", postfix: p.postfix || "" };
+            const out = { name: p.name || "未命名", fixed: p.fixed || "", postfix: p.postfix || "" };
+            const blk = getCommonBlock(p.common, blocks);
+            if (blk) { out.common = blk.id; out.commonName = blk.name; used[blk.id] = true; }
+            return out;
+        });
+        const commons = blocks.filter(function (b) { return used[b.id]; }).map(function (b) {
+            return { id: b.id, name: b.name, value: b.value };
         });
         const d = new Date();
         const p2 = function (n) { return String(n).padStart(2, "0"); };
         const stamp = "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
-        return { _fmt: STYLE_PACK_FMT, version: VERSION, exportedAt: stamp, styles: styles, anchorGuide: getAnchorUsageGuide() };
+        return { _fmt: STYLE_PACK_FMT, version: VERSION, exportedAt: stamp, styles: styles, commons: commons, anchorGuide: getAnchorUsageGuide() };
     }
     function styleExportFile(onlyGuide) {
         try {
@@ -1827,9 +1966,11 @@
     function styleItemFromRaw(raw) {
         const it = raw || {};
         const out = { name: String(it.name || it.title || "未命名").trim() || "未命名", fixed: "", postfix: "" };
-        if (it.fixed != null || it.postfix != null) { out.fixed = String(it.fixed || ""); out.postfix = String(it.postfix || ""); return out; }
-        if (it.prefix != null || it.suffix != null) { out.fixed = String(it.prefix || ""); out.postfix = String(it.suffix || ""); return out; }
-        out.postfix = String(it.value != null ? it.value : (it.text != null ? it.text : (it.content != null ? it.content : (it.prompt || ""))));
+        if (it.fixed != null || it.postfix != null) { out.fixed = String(it.fixed || ""); out.postfix = String(it.postfix || ""); }
+        else if (it.prefix != null || it.suffix != null) { out.fixed = String(it.prefix || ""); out.postfix = String(it.suffix || ""); }
+        else out.postfix = String(it.value != null ? it.value : (it.text != null ? it.text : (it.content != null ? it.content : (it.prompt || ""))));
+        if (it.common != null) out.common = String(it.common || "");
+        if (it.commonName != null) out.commonName = String(it.commonName || "");
         return out;
     }
 
@@ -1844,7 +1985,7 @@
     }
     function packTemplateSplit(raw) {
         let v = packSixTagText(raw);
-        const ph = /\{(?:Camera|Env|Setting|Mood|Chars|Characters|Outfit|Pose|Description)\}/;
+        const ph = /\{(?:Camera|Env|Setting|Mood|Chars|Characters|Outfit|Pose|Description|Common)\}/;
         const lines = v.split(/\r?\n/);
         let cut = 0;
         while (cut < lines.length && ph.test(lines[cut])) cut++;
@@ -1856,7 +1997,7 @@
     function packStyleItem(it) {
         const c = styleItemFromRaw(it);
         const sp = packTemplateSplit(it.value != null ? it.value : (it.postfix != null ? it.postfix : ""));
-        if (sp.fixed || sp.postfix) return { name: c.name, fixed: sp.fixed, postfix: sp.postfix };
+        if (sp.fixed || sp.postfix) { c.fixed = sp.fixed; c.postfix = sp.postfix; }
         return c;
     }
     function packTextItem(it) {
@@ -1880,7 +2021,7 @@
     function packPlan(text) {
         let parsed;
         try { parsed = JSON.parse(String(text || "")); } catch (e) { throw new Error("这不是合法 JSON"); }
-        const plan = { styles: [], rules: [], sys: [], anchors: [], kind: "style", anchorGuide: "" };
+        const plan = { styles: [], commons: [], rules: [], sys: [], anchors: [], kind: "style", anchorGuide: "" };
         if (parsed && parsed.anchorGuide != null && typeof parsed.anchorGuide !== "string") {
             throw new Error("公共规则必须是文本");
         }
@@ -1906,10 +2047,40 @@
         } else {
             throw new Error("不是可识别的预设包（请选择画风、预设或公共规则 JSON）");
         }
+        if (parsed && Array.isArray(parsed.commons)) plan.commons = parsed.commons;
         return plan;
+    }
+    function packCommonItem(raw) {
+        const x = raw || {};
+        return { sourceId: String(x.id || ""), name: String(x.name || x.title || "未命名").trim() || "未命名", value: String(x.value != null ? x.value : (x.text || "")) };
     }
     function packImportText(text) {
         const plan = packPlan(text);
+        const hasCommons = plan.commons.length > 0;
+        const commonList = getCommonBlocks(), commonByName = {}, commonIds = {};
+        commonList.forEach(function (b) { commonByName[b.name] = b.id; commonIds[b.id] = b.id; commonIds[b.name] = b.id; });
+        const commonIncoming = plan.commons.map(packCommonItem).filter(function (b) { return b.name && b.value.trim(); });
+        let commonAdd = 0, commonRep = 0, commonSame = 0;
+        commonIncoming.forEach(function (incoming) {
+            let found = commonList.find(function (b) { return b.name === incoming.name; });
+            if (!found) {
+                found = { id: newId(), name: incoming.name, value: incoming.value };
+                commonList.push(found); commonAdd++;
+            } else if (found.value.trim() !== incoming.value.trim()) {
+                found.value = incoming.value; commonRep++;
+            } else commonSame++;
+            commonByName[incoming.name] = found.id;
+            commonIds[incoming.name] = found.id;
+            if (incoming.sourceId) commonIds[incoming.sourceId] = found.id;
+        });
+        const cleanStyle = function (raw) {
+            const out = (plan.kind === "pack" ? packStyleItem : styleItemFromRaw)(raw);
+            if (hasCommons) {
+                const it = raw || {};
+                out.common = commonIds[String(it.common || "")] || commonByName[String(it.commonName || "")] || commonByName[String(it.common || "")] || "";
+            }
+            return out;
+        };
         /* 旧包的空公共规则表示未携带自定义内容，不能清空现有规则。 */
         const guideChanged = !!plan.anchorGuide && plan.anchorGuide !== getAnchorUsageGuide();
         /* 合并计划：每组 {label, list(现有), incoming(清洗后), key(名字字段), valueFields}，算出新增/覆盖/相同 */
@@ -1920,7 +2091,7 @@
             });
             return { label: label, list: current, incoming: inc, key: keyField, fields: valueFields, jsonKey: jsonKey, idKey: idKey, flat: flatMap, add: 0, rep: 0, same: 0 };
         };
-        if (plan.kind !== "guide") groups.push(mkGroup("画风", getPresets("style"), plan.styles, plan.kind === "pack" ? packStyleItem : styleItemFromRaw, "name", ["fixed", "postfix"], PRESETS.style.jsonKey, PRESETS.style.idKey, PRESETS.style.fields));
+        if (plan.kind !== "guide") groups.push(mkGroup("画风", getPresets("style"), plan.styles, cleanStyle, "name", hasCommons ? ["fixed", "postfix", "common"] : ["fixed", "postfix"], PRESETS.style.jsonKey, PRESETS.style.idKey, PRESETS.style.fields));
         if (plan.kind === "pack") {
             groups.push(mkGroup("提取规则", getPresets("rules"), plan.rules, packRuleItem, "name", ["text"], PRESETS.rules.jsonKey, PRESETS.rules.idKey, PRESETS.rules.fields));
             groups.push(mkGroup("系统提示", getSystemPrompts(), plan.sys, packSysItem, "name", ["value"], "extSystemPromptsJson", "extActiveSystemPrompt", null));
@@ -1937,15 +2108,17 @@
             });
             totalAdd += g.add; totalRep += g.rep; totalSame += g.same;
         });
-        const usable = groups.reduce(function (n, g) { return n + g.incoming.length; }, 0);
+        totalAdd += commonAdd; totalRep += commonRep; totalSame += commonSame;
+        const usable = groups.reduce(function (n, g) { return n + g.incoming.length; }, 0) + commonIncoming.length;
         if (!usable && !plan.anchorGuide) { setStatus("包里没有可用的预设内容", C_WARN); return; }
-        if (totalAdd === 0 && totalRep === 0 && !guideChanged) { setStatus("文件里的预设和公共规则与现有一致，什么都没变", C_OK); return; }
+        if (totalAdd === 0 && totalRep === 0 && !guideChanged) { setStatus("文件里的预设、公共块和公共规则与现有一致，什么都没变", C_OK); return; }
 
         const lines = ["将导入预设包，按名字合并："];
         groups.forEach(function (g) {
             if (!g.incoming.length) return;
             lines.push("· " + g.label + "：新增 " + g.add + " / 覆盖 " + g.rep + (g.same ? " / 相同 " + g.same : ""));
         });
+        if (commonIncoming.length) lines.push("· 公共块：新增 " + commonAdd + " / 覆盖 " + commonRep + (commonSame ? " / 相同 " + commonSame : ""));
         if (guideChanged) lines.push("· 公共规则：替换当前规则（对所有角色锚点生效）");
         lines.push("同名内容不同的会被覆盖，新增的追加，不会清空现有内容。继续吗？");
         if (totalAdd > 0 || totalRep > 0 || guideChanged) {
@@ -1955,7 +2128,8 @@
             if (!window.confirm(msg)) { setStatus("已取消导入，什么都没动", C_WARN); return; }
         }
 
-        /* 落盘合并 */
+        /* 落盘合并：先存公共块，画风里的 common 才能指向本地 ID。 */
+        if (commonIncoming.length) saveCommonBlocks(commonList, true);
         groups.forEach(function (g) {
             if (!g.incoming.length) return;
             g.incoming.forEach(function (incoming) {
@@ -1978,6 +2152,7 @@
         }
         /* 刷新界面：画风/规则/锚点走预设行；系统提示重建下拉 */
         ["style", "rules", "anchors"].forEach(function (k) { try { refreshPresetUI(k); } catch (e) {} });
+        try { refreshCommonEditors(); } catch (e) {}
         try {
             const sysSel = q("#sdg-sys-select"), sysVal = q("#sdg-sys-value");
             if (sysSel) {
@@ -1991,6 +2166,7 @@
         const summaryParts = groups.filter(function (g) { return g.incoming.length; }).map(function (g) {
             return g.label + " 新增" + g.add + "/覆盖" + g.rep;
         });
+        if (commonIncoming.length) summaryParts.push("公共块 新增" + commonAdd + "/覆盖" + commonRep);
         if (guideChanged) summaryParts.push("公共规则已更新");
         const summary = summaryParts.join("，");
         setStatus("导入完成 ✓ " + summary, C_OK);
@@ -3747,10 +3923,24 @@
         return t.trim();
     }
 
+    function buildFinalPrompt(desc, layers, c) {
+        c = c || cfg();
+        const style = activePreset("style") || {};
+        let fixed = String(c.genFixedPrompt || ""), postfix = String(c.genPostfixPrompt || "");
+        const common = styleCommonText(style, fixed, postfix);
+        const explicit = fixed.indexOf(COMMON_PH) >= 0 || postfix.indexOf(COMMON_PH) >= 0;
+        fixed = applyCommonPlaceholder(fixed, common);
+        postfix = applyCommonPlaceholder(postfix, common);
+        const parts = [styleSegment(fixed, layers), String(desc || "").trim(), styleSegment(postfix, layers)].filter(Boolean);
+        /* 未显式定位时，公共块固定接在场景与画风之后；不写 {Common} 的旧画风只多出所挂公共块。 */
+        if (common && !explicit) parts.push(styleSegment(common, layers));
+        return parts.filter(Boolean).join(", ");
+    }
+
     async function generateImage(desc, layers) {
         const c = cfg();
         if (!c.genModel) throw new Error("请先填写生图模型");
-        const finalPrompt = [styleSegment(c.genFixedPrompt, layers), String(desc || "").trim(), styleSegment(c.genPostfixPrompt, layers)].filter(Boolean).join(", ");
+        const finalPrompt = buildFinalPrompt(desc, layers, c);
         if (!finalPrompt) throw new Error("没有可用的生图提示词");
         log("生图最终提示词:", finalPrompt.slice(0, 200));
 
@@ -5228,6 +5418,7 @@
 
                 /* ========== 提取页（工作区在这里） ========== */
                 '<section class="sdg-pane" id="sdg-pane-ext">' +
+                    '<details class="sdg-fold" id="sdg-fold-work" open><summary>提取结果</summary><div class="sdg-fold-body">' +
                     '<div class="sdg-work">' +
                         '<textarea id="sdg-preview" placeholder="提取出的生图描述（可手改后注入 / 生图）"></textarea>' +
                         '<div class="sdg-btns sdg-main-btns">' +
@@ -5242,18 +5433,28 @@
                             layerRowsHTML() +
                         '</div>' +
                     '</div>' +
+                    '</div></details>' +
 
                     /* —— 画风：跟提取规则分开的独立分区，可存多个 —— */
-                    '<h5>🎨 画风（管生图风格）</h5>' +
+                    '<details class="sdg-fold" id="sdg-fold-style"><summary>画风与公共块</summary><div class="sdg-fold-body">' +
                     presetRowHTML("style", "画风预设",
                         '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风 / 预设 / 公共规则）">⬆</button>' +
                         '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风与公共规则 JSON">⬇</button>' +
                         '<input type="file" id="sdg-style-file" accept=".json,application/json" style="position:absolute;left:-9999px;width:1px;height:1px">') +
                     bigField("sdg-gen-fixed", "genFixedPrompt", 3, "例：Korean semi-realistic anime, ultra-detailed digital painting…", "风格词（拼在描述前）") +
-                    bigField("sdg-gen-postfix", "genPostfixPrompt", 2, "例：masterpiece, best quality", "后缀词（拼在描述后）") +
-                    '<div class="sdg-hint">画风只影响出图风格，不会发给副AI；跟下面的「提取规则」是两回事。预设行 ⬆ 导入 JSON、⬇ 导出画风与公共规则，可备份或分享（不含角色锚点、API 与密钥）。公共规则也可在提取页单独导出。</div>' +
+                    bigField("sdg-gen-postfix", "genPostfixPrompt", 2, "例：masterpiece, best quality；写 {Common} 可指定公共块位置", "后缀词（拼在描述后）") +
+                    field("挂公共块", '<select id="sdg-style-common"></select>') +
+                    '<details class="sdg-common-blocks"><summary>公共块（多个画风共用的固定提示词）</summary>' +
+                        field("编辑公共块", '<select id="sdg-common-slot"></select>') +
+                        field("公共块名称", '<input type="text" id="sdg-common-name" placeholder="例如：通用 / 古风">') +
+                        field("公共块内容", '<textarea id="sdg-common-text" rows="4" placeholder="人物区分、解剖与手、无文字水印、固定收尾句……"></textarea>') +
+                        '<div class="sdg-btns"><button type="button" id="sdg-common-add">新增公共块</button><button type="button" id="sdg-common-delete">删除当前</button></div>' +
+                        '<div class="sdg-hint">顺序：场景描述 → 画风前缀／后缀 → 公共块。画风里写了 {Common} 就放在指定位置；公共块不发给提取副AI。</div>' +
+                    '</details>' +
+                    '<div class="sdg-hint">画风与公共块只影响最终提示词，不会发给副AI；跟下面的「提取规则」是两回事。预设行 ⬆ 导入 JSON、⬇ 导出画风、公共块与公共规则，可备份或分享（不含角色锚点、API 与密钥）。公共规则也可在提取页单独导出。</div>' +
 
-                    '<h5>📝 提取规则（管副AI怎么写描述）</h5>' +
+                    '</div></details>' +
+                    '<details class="sdg-fold" id="sdg-fold-api"><summary>副 AI 接口</summary><div class="sdg-fold-body">' +
                     siteRowHTML("ext") +
                     field("接口", '<select id="sdg-ext-api"><option value="openai">OpenAI 兼容</option><option value="vertex">Vertex 直连</option></select>') +
                     '<div id="sdg-ext-box-openai">' +
@@ -5268,11 +5469,17 @@
                         '<div class="sdg-hint">密钥用酒馆 API 连接页里存的 Vertex 那把</div>' +
                     '</div>' +
                     modelRowHTML("ext") +
+                    '</div></details>' +
+                    '<details class="sdg-fold" id="sdg-fold-system"><summary>系统提示</summary><div class="sdg-fold-body">' +
                     field("系统提示", '<select id="sdg-sys-select">' + sysOpts + '</select>') +
                     '<textarea id="sdg-sys-value" rows="4"></textarea>' +
                     '<div class="sdg-btns"><button type="button" id="sdg-sys-save">保存系统提示</button></div>' +
+                    '</div></details>' +
+                    '<details class="sdg-fold" id="sdg-fold-rules"><summary>提取规则</summary><div class="sdg-fold-body">' +
                     presetRowHTML("rules", "提取规则预设") +
                     bigField("sdg-rules", "extRules", 3, "给副AI的额外要求，例：只写可见画面、不要心理活动、镜头别太远……", "提取规则") +
+                    '</div></details>' +
+                    '<details class="sdg-fold" id="sdg-fold-anchors"><summary>角色锚点与公共规则</summary><div class="sdg-fold-body">' +
                     presetRowHTML("anchors", "角色锚点预设") +
                     field("角色锚点", textArea("sdg-anchors", "extAnchors", 3, "角色名：外貌描述……")) +
                     '<details class="sdg-anchor-guide"><summary>公共规则（所有角色锚点共用）</summary>' +
@@ -5285,11 +5492,14 @@
                             '<button type="button" id="sdg-anchor-guide-export">导出公共规则</button>' +
                         '</div>' +
                     '</details>' +
+                    '</div></details>' +
+                    '<details class="sdg-fold" id="sdg-fold-request"><summary>注入模板与请求设置</summary><div class="sdg-fold-body">' +
                     field("注入模板", textArea("sdg-template", "template", 2, DEFAULT_TEMPLATE)) +
                     '<div class="sdg-hint">默认 image###{Description}###　分层可用 {Camera} {Env} {Mood} {Chars} {Outfit} {Pose}</div>' +
                     chk("sdg-ext-proxy", "extProxy", "走酒馆后端代理") +
                     chk("sdg-retry", "retryOnce", "自动提取失败 10 秒后重试一次") +
                     field("超时（秒，0 = 不限）", textInput("sdg-timeout", "requestTimeout", "0", "number")) +
+                    '</div></details>' +
                 '</section>' +
             '</div>' +
         '</div>';
@@ -5893,6 +6103,7 @@
             parseLayers, mergeLayers, joinLayers, layerContract, isNoChange,
             injectDescToMessage, reinjectDescToMessage, renderFloorImage, renderAllImages,
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
+            getCommonBlocks, getCommonBlock, styleCommonText, applyCommonPlaceholder, setStyleCommon, setCommonValue, addCommonBlock, deleteCommonBlock, refreshCommonEditors, buildFinalPrompt,
             normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
             imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, packSixTagText, stylePackBuild, getSystemPrompts, getAnchorUsageGuide, anchorGuidePackBuild,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
