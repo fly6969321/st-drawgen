@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.24 */
+/* 生图工坊 · DrawGen v1.8.25 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -234,6 +234,8 @@
 .sdg-fold > summary::after { content: "▸"; color: var(--sdg-fg2); }
 .sdg-fold[open] > summary::after { content: "▾"; }
 .sdg-fold > .sdg-fold-body { padding: 0 10px 10px; }
+/* 分层内容收进折叠区后不再套第二层框 */
+.sdg-fold #sdg-layers { padding: 0; border: 0; background: none; }
 
 /* —— 分层工作区 —— */
 #sdg-layers {

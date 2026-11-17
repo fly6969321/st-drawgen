@@ -151,22 +151,22 @@ test('imgUrlFromGen handles b64_json and url items', t => {
     assert.equal(debug.imgUrlFromGen({ data: [] }), '');
 });
 
-test('styleSegment fills scaffold placeholders from layers and skips unresolved ones', t => {
+test('buildStyleCore fills layer placeholders in place and drops lines whose placeholders are all empty', t => {
     const { debug } = fixture(t);
     const layers = { camera: 'close-up', env: 'forest', mood: 'warm', chars: 'a girl', outfit: 'white dress', pose: 'standing' };
-    assert.equal(
-        debug.styleSegment('Composition: {Camera} | Setting: {Env} | Mood: {Mood}', layers),
-        'Composition: close-up | Setting: forest | Mood: warm'
-    );
-    /* 空层值产生的空壳段落被清掉 */
-    assert.equal(
-        debug.styleSegment('Composition: {Camera} | Setting: {Env} | Mood: {Mood}', { camera: 'close-up' }),
-        'Composition: close-up'
-    );
-    /* 非分层时带占位符的前缀整段跳过，绝不把 {Camera} 发出去 */
-    assert.equal(debug.styleSegment('Composition: {Camera}', null), '');
-    /* 普通画风词原样返回 */
-    assert.equal(debug.styleSegment('masterpiece, best quality', null), 'masterpiece, best quality');
+    const TPL = 'Composition: {Camera}\nSetting: {Env}\nMood: {Mood}\n{Description}\nmasterpiece';
+    /* 占位符原地填；{Description} 只拿没单独放置的层，同一层不写两遍 */
+    assert.equal(debug.buildStyleCore(TPL, 'ignored', layers), 'Composition: close-up\nSetting: forest\nMood: warm\na girl white dress standing\nmasterpiece');
+    /* 这一行的占位符全空：连「Setting:」这种标签一起不输出 */
+    assert.equal(debug.buildStyleCore(TPL, '', { camera: 'close-up' }), 'Composition: close-up\nmasterpiece');
+    /* 没分层结果：层占位符那几行收掉，整段进 {Description}，绝不把 {Camera} 发出去 */
+    assert.equal(debug.buildStyleCore(TPL, 'a girl in forest', null), 'a girl in forest\nmasterpiece');
+    assert.equal(debug.buildStyleCore('Composition: {Camera}', 'a girl', null), 'Composition: a girl');
+    /* 模板里没有 {Outfit}：服装跟着 {Chars} 那一格走，不丢 */
+    assert.equal(debug.buildStyleCore('Who: {Chars}\n{Description}', '', { chars: 'a girl', outfit: 'white dress', pose: 'standing' }), 'Who: a girl white dress\nstanding');
+    assert.equal(debug.buildStyleCore('Who: {Chars}\nWear: {Outfit}', '', { chars: 'a girl', outfit: 'white dress' }), 'Who: a girl\nWear: white dress');
+    /* 没有任何占位符的画风：描述接在后面 */
+    assert.equal(debug.buildStyleCore('masterpiece, best quality', 'a girl', null), 'masterpiece, best quality, a girl');
 });
 
 test('packSixTagText upgrades five-tag contracts mechanically', t => {
@@ -176,15 +176,18 @@ test('packSixTagText upgrades five-tag contracts mechanically', t => {
     assert.match(debug.packSixTagText('{Camera}/{Env}/{Mood}/{Chars}/{Pose}'), /\{Outfit\}/);
 });
 
-test('packTemplateSplit splits scaffold prefix from style body', t => {
+test('styleValueFromParts merges the old prefix / suffix boxes into one template without changing output', t => {
     const { debug } = fixture(t);
-    const sp = debug.packTemplateSplit('Composition: {Camera}/{Setting}/{Mood}/{Characters}/{Pose}\nKorean semi-realistic anime, ultra detailed');
-    assert.match(sp.fixed, /\{Outfit\}/);
-    assert.match(sp.fixed, /Composition:/);
-    assert.equal(sp.postfix, 'Korean semi-realistic anime, ultra detailed');
-    const plain = debug.packTemplateSplit('just style words, masterpiece');
-    assert.equal(plain.fixed, '');
-    assert.equal(plain.postfix, 'just style words, masterpiece');
+    assert.equal(debug.styleValueFromParts('', ''), '');
+    assert.equal(debug.styleValueFromParts('', 'soft pastel'), '{Description}, soft pastel');
+    assert.equal(debug.styleValueFromParts('masterpiece', ''), 'masterpiece, {Description}');
+    assert.equal(debug.styleValueFromParts('masterpiece', 'soft pastel'), 'masterpiece, {Description}, soft pastel');
+    /* 以前从小海螺包拆开存的（带占位符）：接回整张模板 */
+    assert.equal(debug.styleValueFromParts('Composition: {Camera}\nSetting: {Env}', 'soft pastel'), 'Composition: {Camera}\nSetting: {Env}\nsoft pastel');
+    for (const [fixed, postfix] of [['', 'soft pastel'], ['masterpiece', ''], ['masterpiece', 'soft pastel']]) {
+        const old = [fixed, 'a girl', postfix].filter(Boolean).join(', ');
+        assert.equal(debug.buildStyleCore(debug.styleValueFromParts(fixed, postfix), 'a girl', null), old);
+    }
 });
 
 test('packPlan recognizes style packs, preset packs and loose arrays', t => {
@@ -218,8 +221,8 @@ test('packImportText merges styles by name with overwrite/add counts', t => {
     const after = debug.getPresets('style');
     assert.equal(after.length, 2);
     const byName = Object.fromEntries(after.map(p => [p.name, p]));
-    assert.equal(byName['默认'].fixed, 'prefix-default');
-    assert.equal(byName['赛璐璐'].postfix, 'clean lines');
+    assert.equal(byName['默认'].value, 'prefix-default, {Description}, postfix-default');
+    assert.equal(byName['赛璐璐'].value, 'cel style, {Description}, clean lines');
 });
 
 test('preset pack import merges templates, rules, system prompts and anchors', t => {
@@ -227,7 +230,7 @@ test('preset pack import merges templates, rules, system prompts and anchors', t
     w.confirm = () => true;
     const pack = {
         _fmt: 'ipe-image-pack',
-        templates: [{ name: '电影感', value: 'Composition: {Camera}/{Setting}/{Mood}/{Characters}/{Pose}\ncinematic lighting, film grain' }],
+        templates: [{ name: '电影感', value: '<draw>\r\nComposition: {Camera}\r\nSetting: {Env}\r\ncinematic lighting, film grain\r\n</draw>', group: '写实' }],
         rules: [{ name: '只写画面', text: '只输出可见画面，镜头 / 环境 / 氛围 / 人物 / 动作 五层' }],
         systemPrompts: [{ name: '自定义系统', value: 'You are an image describer. Camera / Setting / Mood / Characters / Pose' }],
         anchors: [{ name: '女主', text: '女主：银发少女' }]
@@ -236,8 +239,8 @@ test('preset pack import merges templates, rules, system prompts and anchors', t
     const styles = debug.getPresets('style');
     const film = styles.find(p => p.name === '电影感');
     assert.ok(film, 'template imported as style');
-    assert.match(film.fixed, /\{Outfit\}/, 'five-tag scaffold upgraded in prefix');
-    assert.equal(film.postfix, 'cinematic lighting, film grain');
+    assert.equal(film.value, '<draw>\nComposition: {Camera}\nSetting: {Env}\ncinematic lighting, film grain\n</draw>', 'whole template imported as-is');
+    assert.equal(film.group, '写实');
     const rules = debug.getPresets('rules');
     assert.ok(rules.some(p => p.name === '只写画面'));
     assert.match(rules.find(p => p.name === '只写画面').text, /服装/);

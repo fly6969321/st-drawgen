@@ -48,7 +48,7 @@ function fixture(t, msg = swipedMessage(), overrides = {}) {
         sdgBuiltinSeeded17: true, enabled: true, imageKeepCount: 0,
         extEndpoint: 'https://extract.test/v1', extModel: 'test-extractor', extKey: 'test-only', extProxy: false,
         genEndpoint: 'https://images.test/v1', genModel: 'test-image-model', genKey: 'test-only', genProxy: false,
-        genFixedPrompt: 'Setting: {Env}', genPostfixPrompt: '', convertToJpeg: false,
+        genStyle: 'Setting: {Env}', convertToJpeg: false,
         autoExtract: true, autoInject: true, autoGenerate: true, layered: false,
         template: 'image###{Description}###',
     }, overrides);
@@ -139,7 +139,7 @@ test('an old mismatching cached record cannot add the previous reply layers to t
     msg.extra = clone(msg.swipe_info[1].extra); // Existing data polluted by an older version.
     const f = fixture(t, msg);
     await f.finish(f.debug.generateForFloor(0, '', 0));
-    assert.equal(f.prompt(f.images()[0]), 'third-scene');
+    assert.equal(f.prompt(f.images()[0]), 'Setting: third-scene');
 });
 
 test('multiple markers only reuse the layers of the matching slot', async t => {
@@ -148,8 +148,8 @@ test('multiple markers only reuse the layers of the matching slot', async t => {
     const f = fixture(t, msg);
     await f.finish(f.debug.generateForFloor(0, '', 0));
     await f.finish(f.debug.generateForFloor(0, '', 1));
-    assert.equal(f.prompt(f.images()[0]), 'first-slot');
-    assert.equal(f.prompt(f.images()[1]), 'Setting: setting-for-third-scene, third-scene');
+    assert.equal(f.prompt(f.images()[0]), 'Setting: first-slot');
+    assert.equal(f.prompt(f.images()[1]), 'Setting: setting-for-third-scene');
 });
 
 test('custom XML templates retain matching layers when old records only saved the envelope name', async t => {
@@ -160,7 +160,7 @@ test('custom XML templates retain matching layers when old records only saved th
     assert.equal(f.msg.extra.sdg_env, 'draw');
     assert.equal(f.msg.extra.sdg_tag, undefined, 'legacy XML records contain no complete saved marker');
     await f.finish(f.debug.generateForFloor(0, '', 0));
-    assert.equal(f.prompt(f.images()[0]), 'Setting: current-room, current-room | Action: current-action');
+    assert.equal(f.prompt(f.images()[0]), 'Setting: current-room, current-action');
 });
 
 test('custom XML template reconstruction cannot reintroduce another reply layers', async t => {
@@ -171,7 +171,7 @@ test('custom XML template reconstruction cannot reintroduce another reply layers
     f.msg.extra.sdg_desc = 'previous-room previous-action';
     f.msg.extra.sdg_layers = { env: 'previous-room', pose: 'previous-action' };
     await f.finish(f.debug.generateForFloor(0, '', 0));
-    assert.equal(f.prompt(f.images()[0]), 'current-room | Action: current-action');
+    assert.equal(f.prompt(f.images()[0]), 'Setting: current-room | Action: current-action');
     assert.doesNotMatch(f.prompt(f.images()[0]), /previous-/);
 });
 
@@ -250,7 +250,7 @@ test('normal extraction saves its marker before generating and preserves the sam
     await f.finish(f.debug.runExtract(f.msg.mes, '', { auto: true, targetIdx: 0 }));
     assert.equal(f.calls.length, 2);
     assert.equal(f.images().length, 1);
-    assert.equal(f.prompt(f.images()[0]), 'Setting: current-room, current-room current-action');
+    assert.equal(f.prompt(f.images()[0]), 'Setting: current-room, current-action');
     assert.equal(f.msg.extra.sdg_desc, 'current-room current-action');
     assert.deepEqual(clone(f.msg.swipe_info[2].extra.sdg_gal['2']['0'].list), [IMAGE]);
 });

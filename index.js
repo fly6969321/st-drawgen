@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.24
+ *  生图工坊 · DrawGen v1.8.25
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -121,12 +121,16 @@
  *  · v1.8.24 ①公共块：各画风共用的通用提示词单独存成多份，每个画风选挂一份，出图时拼在画风后面
  *    （画风里写 {Common} 就放在那里）；导入小海螺画风包时公共块和挂接一起带进来。
  *    ②提取页按功能分区，点标题收起 / 展开，开合状态记住。
+ *  · v1.8.25 ①画风的「风格词 / 后缀词」并成一张模板，出图时照小海螺的拼法占位符原地填
+ *    （场景分层 → 画风正文 → 公共块，{Description} 只拿没单独放置的层）；小海螺画风包整张原样导入。
+ *    ②画风分组：导入带进来，可改所属分组，下拉按组筛选。③分层内容可收起。
+ *    ④「公共规则」改名「锚点规则」（免得和公共块混）。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.24";
+    const VERSION = "1.8.25";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -172,7 +176,7 @@
         extRules: "",
         extAnchors: "",
         anchorGuideOn: true,
-        anchorUsageGuide: "",      // 公共规则：留空沿用内置默认，所有角色锚点共用
+        anchorUsageGuide: "",      // 锚点规则：留空沿用内置默认，所有角色锚点共用
         extProxy: false,
         requestTimeout: 0,
         retryOnce: true,
@@ -188,7 +192,8 @@
         hideTagText: true,          // 出图后标记文字不显示（标记原位换成图）
         // —— 生图 ——
         genEndpoint: "", genKey: "", genModel: "",
-        genFixedPrompt: "", genPostfixPrompt: "",
+        genStyle: "{Description}",       // 当前画风的整张模板
+        styleGroupFilter: "",            // 画风分组筛选："" = 全部，"__none__" = 未分组，其余 = 组名
         stylesJson: "", styleId: "",     // 画风预设（可存多个随时切）
         foldsOpen: {},                   // 提取页各分区的展开状态 { 分区名: true }，默认全收起
         commonsJson: "", commonId: "",   // 公共块：[{id,name,value}]，画风的 common 字段挂其中一份；commonId = 编辑区当前选中的
@@ -1391,6 +1396,24 @@
                 if (st[k] === undefined) st[k] = (v && typeof v === "object") ? Object.assign({}, v) : v;
             }
             if (!st.layerLocks || typeof st.layerLocks !== "object") st.layerLocks = {};
+            /* 1.8.25：画风的「风格词 / 后缀词」两格并成一张模板；改之前的画风列表原样留一份在 stylesJsonV1 */
+            if (!st.sdgStyleOneBox1825) {
+                const old = safeJson(st.stylesJson, null);
+                if (Array.isArray(old) && old.length) {
+                    st.stylesJsonV1 = st.stylesJson;
+                    old.forEach(function (p) {
+                        if (!p || typeof p !== "object" || p.value != null) return;
+                        p.value = styleValueFromParts(p.fixed, p.postfix) || STYLE_DEFAULT;
+                        delete p.fixed; delete p.postfix;
+                    });
+                    st.stylesJson = JSON.stringify(old);
+                    const cur = old.filter(function (p) { return p && p.id === st.styleId; })[0] || old.filter(function (p) { return p && p.id; })[0];
+                    if (cur) st.genStyle = cur.value;
+                } else if (st.genFixedPrompt != null || st.genPostfixPrompt != null) {
+                    st.genStyle = styleValueFromParts(st.genFixedPrompt, st.genPostfixPrompt) || STYLE_DEFAULT;
+                }
+                st.sdgStyleOneBox1825 = true;
+            }
             /* 1.8.2：撤销 1.8.1 那次把「超时」从 0 强抬到 180 的迁移。
                thinking 模型想得久，180 秒会把慢站点掐断；锁死问题交给看门狗兜，
                不该替她改请求行为。只回退迁移写进去的那个 180，她自己填的值不动。 */
@@ -1655,10 +1678,10 @@
        文本预设（画风 / 提取规则 / 角色锚点 各一套，可存多个下拉切）
        每套 = { jsonKey, idKey, fields: {字段名: 扁平cfg键}, label, selId }
        当前预设的值同时写进扁平字段，下游生图/提取代码不用改。
-       画风 = 拼在生图提示词前后的风格词；提取规则 = 给副AI的写法要求；锚点 = 角色外貌资料。三者互不相干。
+       画风 = 一整张生图模板（{Description} 是描述的位置）；提取规则 = 给副AI的写法要求；锚点 = 角色外貌资料。三者互不相干。
        ============================================================ */
     const PRESETS = {
-        style:   { jsonKey: "stylesJson",  idKey: "styleId",   label: "画风",     selId: "#sdg-style",   fields: { fixed: "genFixedPrompt", postfix: "genPostfixPrompt" }, inputs: { fixed: "#sdg-gen-fixed", postfix: "#sdg-gen-postfix" } },
+        style:   { jsonKey: "stylesJson",  idKey: "styleId",   label: "画风",     selId: "#sdg-style",   fields: { value: "genStyle" }, inputs: { value: "#sdg-gen-style" } },
         rules:   { jsonKey: "rulesJson",   idKey: "rulesId",   label: "提取规则", selId: "#sdg-rules-p", fields: { text: "extRules" },   inputs: { text: "#sdg-rules" } },
         anchors: { jsonKey: "anchorsJson", idKey: "anchorsId", label: "角色锚点", selId: "#sdg-anch-p",  fields: { text: "extAnchors" }, inputs: { text: "#sdg-anchors" } }
     };
@@ -1709,6 +1732,11 @@
         if (name === null) return;
         const p = { id: newId(), name: String(name).trim() || P.label + (list.length + 1) };
         for (const f in P.fields) p[f] = "";
+        if (kind === "style") {
+            p.value = STYLE_DEFAULT;
+            const gf = styleGroupFilter();   /* 正筛着某个组：新画风直接归进去 */
+            if (gf && gf !== GROUP_NONE) p.group = gf;
+        }
         list.push(p);
         saveCritical(P.jsonKey, JSON.stringify(list));
         saveCritical(P.idKey, p.id);
@@ -1740,12 +1768,117 @@
         const P = PRESETS[kind], list = getPresets(kind), cur = activePreset(kind);
         const sel = q(P.selId);
         if (sel) {
-            sel.innerHTML = list.map(function (p) {
+            sel.innerHTML = kind === "style" ? styleOptionsHTML(list, cur.id, styleGroupFilter()) : list.map(function (p) {
                 return '<option value="' + esc(p.id) + '"' + (p.id === cur.id ? " selected" : "") + '>' + esc(p.name || "未命名") + '</option>';
             }).join("");
+            sel.value = cur.id;
         }
         for (const f in P.inputs) { const el = q(P.inputs[f]); if (el) el.value = cfg()[P.fields[f]] || ""; }
-        if (kind === "style") refreshCommonUI();
+        if (kind === "style") { refreshStyleGroupUI(list, cur); refreshCommonUI(); }
+    }
+
+    /* ============================================================
+       画风分组：每个画风一个「所属分组」
+         · 手动指定的优先；没指定的，名字带「古.」「现.」这种短前缀就自动归进「古」「现」
+         · 指定成「未分组」= 存 __none__，带前缀也不再自动归组
+       顶上一个分组下拉筛选（记住选了哪组）；「全部」时画风下拉按组分段。
+       筛选只管显示，不换当前画风：当前那套不在这组，就在列表顶上标「当前」。
+       ============================================================ */
+    const GROUP_NONE = "__none__";
+    const STYLE_PREFIX_RE = /^\s*([^\s.．·・。]{1,4})\s*[.．·・。]\s*\S/;
+    function styleGroupOf(t) {
+        const g = String((t && t.group) || "").trim();
+        if (g === GROUP_NONE) return "";
+        if (g) return g;
+        const m = String((t && t.name) || "").match(STYLE_PREFIX_RE);
+        return (m && !/\d/.test(m[1])) ? m[1] : "";   /* 「2.5D 厚涂」「v1.2」这种是版本号不是组 */
+    }
+    /* [{ name, n }]，按名字排；未分组不在里面 */
+    function styleGroups(list) {
+        const cnt = {}, names = [];
+        (list || getPresets("style")).forEach(function (t) {
+            const g = styleGroupOf(t); if (!g) return;
+            if (!cnt[g]) { cnt[g] = 0; names.push(g); }
+            cnt[g]++;
+        });
+        names.sort(function (a, b) {
+            try { return a.localeCompare(b, "zh-Hans-CN", { numeric: true, sensitivity: "base" }); } catch (e) { return a < b ? -1 : (a > b ? 1 : 0); }
+        });
+        return names.map(function (g) { return { name: g, n: cnt[g] }; });
+    }
+    function styleGroupFilter() {
+        const f = String(cfg().styleGroupFilter || "");
+        if (!f) return "";
+        const list = getPresets("style");
+        if (f === GROUP_NONE) return list.some(function (t) { return !styleGroupOf(t); }) ? f : "";
+        return list.some(function (t) { return styleGroupOf(t) === f; }) ? f : "";   /* 组没了（改名 / 删光）就回到全部 */
+    }
+    function styleOptionsHTML(list, activeId, filter) {
+        const opt = function (t, label) {
+            return '<option value="' + esc(t.id) + '"' + (t.id === activeId ? " selected" : "") + '>' + esc(label || t.name || "未命名") + '</option>';
+        };
+        let html = "";
+        if (filter) {
+            const inG = list.filter(function (t) { const g = styleGroupOf(t); return filter === GROUP_NONE ? !g : g === filter; });
+            const cur = list.find(function (t) { return t.id === activeId; });
+            if (cur && inG.indexOf(cur) < 0) html += opt(cur, "（当前）" + (cur.name || "未命名"));
+            inG.forEach(function (t) { html += opt(t); });
+            return html;
+        }
+        const groups = styleGroups(list);
+        if (!groups.length) { list.forEach(function (t) { html += opt(t); }); return html; }
+        groups.forEach(function (g) {
+            html += '<optgroup label="' + esc(g.name) + '">';
+            list.forEach(function (t) { if (styleGroupOf(t) === g.name) html += opt(t); });
+            html += '</optgroup>';
+        });
+        const rest = list.filter(function (t) { return !styleGroupOf(t); });
+        if (rest.length) { html += '<optgroup label="未分组">'; rest.forEach(function (t) { html += opt(t); }); html += '</optgroup>'; }
+        return html;
+    }
+    function refreshStyleGroupUI(list, item) {
+        const groups = styleGroups(list), f = styleGroupFilter();
+        const none = list.filter(function (t) { return !styleGroupOf(t); }).length;
+        const fs = q("#sdg-style-group-filter");
+        if (fs) {
+            let fh = '<option value="">全部（' + list.length + '）</option>';
+            groups.forEach(function (g) { fh += '<option value="' + esc(g.name) + '">' + esc(g.name) + '（' + g.n + '）</option>'; });
+            if (groups.length && none) fh += '<option value="' + GROUP_NONE + '">未分组（' + none + '）</option>';
+            fs.innerHTML = fh; fs.value = f;
+        }
+        const gs = q("#sdg-style-group");
+        if (gs) {
+            const g = styleGroupOf(item);
+            let gh = '<option value="">（未分组）</option>';
+            groups.forEach(function (x) { gh += '<option value="' + esc(x.name) + '">' + esc(x.name) + '</option>'; });
+            gh += '<option value="__new__">＋ 新建分组…</option>';
+            if (g) gh += '<option value="__rename__">✎ 给「' + esc(g) + '」这组改名…</option>';
+            gs.innerHTML = gh; gs.value = g;
+        }
+    }
+    /* 所属分组下拉的选择：组名 / ""（未分组）/ __new__ / __rename__ */
+    function setStyleGroupChoice(v) {
+        const list = getPresets("style"), item = activePreset("style"), cur = styleGroupOf(item);
+        const keepFilter = !!styleGroupFilter();
+        if (v === "__rename__") {
+            const nn = String(window.prompt("给「" + cur + "」这组改个名字", cur) || "").trim();
+            if (!nn || nn === cur || nn === GROUP_NONE) { refreshPresetUI("style"); return; }
+            list.forEach(function (t) { if (styleGroupOf(t) === cur) t.group = nn; });
+            saveCritical(PRESETS.style.jsonKey, JSON.stringify(list));
+            if (String(cfg().styleGroupFilter || "") === cur) saveCritical("styleGroupFilter", nn);
+            setStatus("分组「" + cur + "」改名为「" + nn + "」", C_OK);
+        } else {
+            let ng = v;
+            if (v === "__new__") {
+                ng = String(window.prompt("新分组名字", "") || "").trim();
+                if (!ng || ng === "__new__" || ng === "__rename__" || ng === GROUP_NONE) { refreshPresetUI("style"); return; }
+            }
+            list.forEach(function (t) { if (t.id === item.id) t.group = ng ? ng : GROUP_NONE; });
+            saveCritical(PRESETS.style.jsonKey, JSON.stringify(list));
+            if (keepFilter) saveCritical("styleGroupFilter", ng ? ng : GROUP_NONE);   /* 正筛着某组：跟着这个画风走，免得它从列表里消失 */
+            setStatus("「" + (item.name || "未命名") + "」" + (ng ? "归进「" + ng + "」" : "设为未分组"), C_OK);
+        }
+        refreshPresetUI("style");
     }
 
     /* ============================================================
@@ -1791,21 +1924,93 @@
         });
         return out.join("\n");
     }
+    /* ============================================================
+       画风模板拼装（照小海螺的拼法）
+       画风是一整张模板，占位符原地填：
+         {Description} 描述；分层时 {Camera} {Env} {Mood} {Chars} {Outfit} {Pose} 各填各的，
+         {Description} 只拿没被单独放置的层，同一层不写两遍；
+         多行模板里，某一行的占位符全空，这行连「Setting:」这种标签一起不输出（还剩画风词就把词留下）；
+         {Common} 是公共块的位置，没写就接在最后（空一行）。
+       整张模板外面包着一对 <draw>…</draw> 这类标签的，发给生图站时去掉这对标签。
+       ============================================================ */
+    const STYLE_DEFAULT = "{Description}";
+    function styleHasPh(t) { TPL_PH_RE.lastIndex = 0; const r = TPL_PH_RE.test(String(t || "")); TPL_PH_RE.lastIndex = 0; return r; }
+    /* 旧版两格（风格词 / 后缀词）→ 一张模板：带占位符的是导进来的整张模板被拆开了，原样接回去；
+       不带占位符的按原来的顺序「风格词, 描述, 后缀词」写成模板，出图结果和以前一字不差 */
+    function styleValueFromParts(fixed, postfix) {
+        const f = String(fixed == null ? "" : fixed).trim(), p = String(postfix == null ? "" : postfix).trim();
+        if (!f && !p) return "";
+        if (styleHasPh(f) || styleHasPh(p)) return [f, p].filter(Boolean).join("\n");
+        return [f, STYLE_DEFAULT, p].filter(Boolean).join(", ");
+    }
+    /* 占位符填空以后这一行还剩什么：去掉行首「标签:」、连着的分隔符、首尾分隔符；空串 = 整行只有标签 */
+    function styleLineRest(line) {
+        let t = String(line == null ? "" : line);
+        t = t.replace(/^\s*[A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff \u3000]{0,29}\s*[:：]\s*/, "");
+        t = t.replace(/\s*([,，;；])(?:\s*[,，;；])+\s*/g, function (m, p) { return p + (p === "," || p === ";" ? " " : ""); });
+        t = t.replace(/^[\s,，;；·\-–—]+|[\s,，;；·\-–—]+$/g, "");
+        return t.trim();
+    }
+    function fillStyle(tpl, vals) {
+        const lines = String(tpl == null ? "" : tpl).split("\n");
+        const multi = lines.length > 1, out = [];
+        lines.forEach(function (line) {
+            let hadPh = false, allEmpty = true;
+            TPL_PH_RE.lastIndex = 0;
+            const filled = line.replace(TPL_PH_RE, function (m) {
+                if (!Object.prototype.hasOwnProperty.call(vals, m)) return m;
+                hadPh = true;
+                const v = String(vals[m] == null ? "" : vals[m]);
+                if (v.trim()) allEmpty = false;
+                return v;
+            });
+            if (multi && hadPh && allEmpty) { const rest = styleLineRest(filled); if (rest) out.push(rest); return; }
+            out.push(filled);
+        });
+        return out.join("\n");
+    }
+    function buildStyleCore(tpl, desc, layers) {
+        tpl = String(tpl == null ? "" : tpl);
+        desc = String(desc == null ? "" : desc);
+        const vals = {}, used = {};
+        let any = false;
+        const hasDesc = tpl.indexOf("{Description}") >= 0;
+        LAYERS.forEach(function (l) {
+            const ph = LAYER_PH[l];
+            if (tpl.indexOf(ph) < 0) return;
+            any = true; used[l] = true;
+            vals[ph] = layers ? String(layers[l] || "").trim() : "";
+        });
+        /* 小海螺只有五层、没有服装层，它的模板里没有 {Outfit}：服装跟着人物那一格走 */
+        if (layers && used.chars && !used.outfit) {
+            vals["{Chars}"] = [vals["{Chars}"], String(layers.outfit || "").trim()].filter(Boolean).join(" ");
+            used.outfit = true;
+        }
+        if (layers && any) desc = joinLayers(layers, used);
+        if (hasDesc) { vals["{Description}"] = desc; return fillStyle(tpl, vals); }
+        if (layers || !any) {
+            /* 模板里没有 {Description}：剩下的层（或整段描述）接在后面 */
+            const filled = fillStyle(tpl, vals).replace(/\s+$/, "");
+            return [filled, desc.trim()].filter(Boolean).join(", ");
+        }
+        /* 只为分层写的模板，这次却没有分层结果：整段填进占位符所在的那一片 */
+        const phs = [];
+        TPL_PH_RE.lastIndex = 0;
+        let m;
+        while ((m = TPL_PH_RE.exec(tpl)) !== null) phs.push({ i: m.index, e: m.index + m[0].length });
+        TPL_PH_RE.lastIndex = 0;
+        return tpl.slice(0, phs[0].i) + desc + tpl.slice(phs[phs.length - 1].e);
+    }
     /* 发给生图站的最终提示词 */
     function buildFinalPrompt(desc, layers) {
-        const c = cfg();
-        const rawFixed = String(c.genFixedPrompt || ""), rawPostfix = String(c.genPostfixPrompt || "");
-        const common = styleCommonText(activePreset("style"), rawFixed + "\n" + rawPostfix);
-        let placed = false;
-        const seg = function (raw) {
-            /* 没公共文本：先把 {Common} 去掉；有：等分层占位符填完再放进去，公共块原文不被分层那套收行规则动到 */
-            let t = styleSegment(common ? raw : applyCommonPlaceholder(raw, ""), layers);
-            if (common && t.indexOf(COMMON_PH) >= 0) { t = applyCommonPlaceholder(t, common); placed = true; }
-            return t;
-        };
-        const main = [seg(rawFixed), String(desc || "").trim(), seg(rawPostfix)].filter(Boolean).join(", ");
-        if (!common || placed) return main;
-        return main ? main + "\n\n" + common : common;
+        const raw = String(cfg().genStyle || "").trim() ? String(cfg().genStyle) : STYLE_DEFAULT;
+        const common = styleCommonText(activePreset("style"), raw);
+        let tpl = applyCommonPlaceholder(raw, common);
+        const env = templateEnvelope(tpl);
+        if (env) tpl = tpl.replace(new RegExp("^\\s*<" + escRe(env) + "\\s*>"), "").replace(new RegExp("<\\/" + escRe(env) + "\\s*>\\s*$"), "");
+        let out = buildStyleCore(tpl, String(desc || "").trim(), layers && anyLayer(layers) ? layers : null);
+        if (common && raw.indexOf(COMMON_PH) < 0) out = out.replace(/\s+$/, "") + "\n\n" + common;
+        return out.trim();
     }
     function setStyleCommon(commonId) {
         const list = getPresets("style"), cur = activePreset("style");
@@ -1901,7 +2106,11 @@
             if (sel) sel.addEventListener("change", function (e) { switchPreset(kind, e.target.value); });
             for (const f in P.inputs) {
                 const el = q(P.inputs[f]);
-                if (el) el.addEventListener("change", function (e) { savePresetField(kind, f, e.target.value); });
+                if (el) el.addEventListener("change", function (e) {
+                    let v = e.target.value;
+                    if (kind === "style" && !String(v).trim()) { v = STYLE_DEFAULT; e.target.value = v; }
+                    savePresetField(kind, f, v);
+                });
             }
             refreshPresetUI(kind);
         }
@@ -1910,6 +2119,10 @@
         qa(".sdg-p-del").forEach(function (b) { b.addEventListener("click", function () { delPreset(b.getAttribute("data-k")); }); });
         bindCommons();
         bindFolds();
+        const gFilter = q("#sdg-style-group-filter");
+        if (gFilter) gFilter.addEventListener("change", function (e) { saveCritical("styleGroupFilter", e.target.value); refreshPresetUI("style"); });
+        const gSel = q("#sdg-style-group");
+        if (gSel) gSel.addEventListener("change", function (e) { setStyleGroupChoice(e.target.value); });
 
         /* 画风 JSON 导入 / 导出；导入同时兼容预设包（模板/规则/系统提示/锚点一起归并） */
         const btnExp = q("#sdg-style-export"); if (btnExp) btnExp.addEventListener("click", styleExportFile);
@@ -1929,7 +2142,7 @@
 
     /* ============================================================
        画风预设 JSON 导入 / 导出
-       · 导出：drawgen-style-pack 包，包含画风与公共规则，不含 API 与密钥
+       · 导出：drawgen-style-pack 包，包含画风与锚点规则，不含 API 与密钥
        · 导入：画风包（styles 数组）按名字合并；
          预设包（templates 数组 / ipe-image-pack 格式）的模板转画风，
          规则 / 系统提示 / 角色锚点各自归并；按名字合并不清空现有内容
@@ -1944,12 +2157,12 @@
         const commons = getCommons();
         const styles = getPresets("style").map(function (p) {
             const blk = commonById(p.common, commons);
-            return { name: p.name || "未命名", fixed: p.fixed || "", postfix: p.postfix || "", common: blk ? blk.id : "", commonName: blk ? blk.name || "" : "" };
+            return { name: p.name || "未命名", value: String(p.value || ""), group: String(p.group || ""), common: blk ? blk.id : "", commonName: blk ? blk.name || "" : "" };
         });
         const d = new Date();
         const p2 = function (n) { return String(n).padStart(2, "0"); };
         const stamp = "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
-        return { _fmt: STYLE_PACK_FMT, version: VERSION, exportedAt: stamp, styles: styles,
+        return { _fmt: STYLE_PACK_FMT, _v: 2, version: VERSION, exportedAt: stamp, styles: styles,
             commons: commons.map(function (b) { return { id: b.id, name: b.name || "未命名", value: String(b.value || "") }; }),
             anchorGuide: getAnchorUsageGuide() };
     }
@@ -1966,24 +2179,25 @@
             a.href = url; a.download = (onlyGuide ? "drawgen-anchor-guide-" : "drawgen-styles-") + stamp + ".json";
             document.body.appendChild(a); a.click(); a.remove();
             setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
-            setStatus(onlyGuide ? "已导出公共规则 JSON ✓" : "已导出画风与公共规则 JSON ✓ 共 " + pack.styles.length + " 套画风", C_OK);
+            setStatus(onlyGuide ? "已导出锚点规则 JSON ✓" : "已导出画风与锚点规则 JSON ✓ 共 " + pack.styles.length + " 套画风", C_OK);
         } catch (e) {
             setStatus("导出失败：" + (e && e.message || e), C_ERR);
         }
     }
     function stylePickAndImport() { const el = q("#sdg-style-file"); if (el) el.click(); }
 
-    function styleItemFromRaw(raw) {
+    /* tpl = true：value 就是整张模板（本插件 1.8.25 起导出的画风包）；否则按旧格式认（前缀 / 后缀，或只有一段风格词） */
+    function styleItemFromRaw(raw, tpl) {
         const it = raw || {};
-        const out = { name: String(it.name || it.title || "未命名").trim() || "未命名", fixed: "", postfix: "" };
-        if (it.fixed != null || it.postfix != null) { out.fixed = String(it.fixed || ""); out.postfix = String(it.postfix || ""); return out; }
-        if (it.prefix != null || it.suffix != null) { out.fixed = String(it.prefix || ""); out.postfix = String(it.suffix || ""); return out; }
-        out.postfix = String(it.value != null ? it.value : (it.text != null ? it.text : (it.content != null ? it.content : (it.prompt || ""))));
+        const out = { name: String(it.name || it.title || "未命名").trim() || "未命名", value: "" };
+        if (it.fixed != null || it.postfix != null) { out.value = styleValueFromParts(it.fixed, it.postfix); return out; }
+        if (it.prefix != null || it.suffix != null) { out.value = styleValueFromParts(it.prefix, it.suffix); return out; }
+        const v = String(it.value != null ? it.value : (it.text != null ? it.text : (it.content != null ? it.content : (it.prompt || ""))));
+        out.value = tpl ? v : styleValueFromParts("", v);
         return out;
     }
 
-    /* 预设包模板：占位符脚手架（Composition: {Camera} …）进前缀，其余风格正文进后缀；
-       旧包写死五标签合同，导入时机械升级为六标签（只动标签枚举） */
+    /* 旧包写死五标签合同，导入时机械升级为六标签（只动标签枚举） */
     function packSixTagText(v) {
         return String(v == null ? "" : v)
             .replace(/Camera\s*\/\s*Setting\s*\/\s*Mood\s*\/\s*Characters\s*\/\s*Pose/g, "Camera / Setting / Mood / Characters / Outfit / Pose")
@@ -1991,22 +2205,11 @@
             .replace(/\{Camera\}\/\{Setting\}\/\{Mood\}\/\{Characters\}\/\{Pose\}/g, "{Camera}/{Setting}/{Mood}/{Characters}/{Outfit}/{Pose}")
             .replace(/\{Camera\}\s*\/\s*\{Env\}\s*\/\s*\{Mood\}\s*\/\s*\{Chars\}\s*\/\s*\{Pose\}/g, "{Camera}/{Env}/{Mood}/{Chars}/{Outfit}/{Pose}");
     }
-    function packTemplateSplit(raw) {
-        let v = packSixTagText(raw);
-        const ph = /\{(?:Camera|Env|Setting|Mood|Chars|Characters|Outfit|Pose|Description)\}/;
-        const lines = v.split(/\r?\n/);
-        let cut = 0;
-        while (cut < lines.length && ph.test(lines[cut])) cut++;
-        const fixed = lines.slice(0, cut).join("\n").trim();
-        const postfix = lines.slice(cut).join("\n").trim();
-        if (fixed && postfix) return { fixed: fixed, postfix: postfix };
-        return { fixed: "", postfix: v.trim() };
-    }
+    /* 小海螺画风包的模板：整张原样进来 */
     function packStyleItem(it) {
-        const c = styleItemFromRaw(it);
-        const sp = packTemplateSplit(it.value != null ? it.value : (it.postfix != null ? it.postfix : ""));
-        if (sp.fixed || sp.postfix) return { name: c.name, fixed: sp.fixed, postfix: sp.postfix };
-        return c;
+        const x = it || {};
+        if (x.value == null) return styleItemFromRaw(x, false);
+        return { name: String(x.name || x.title || "未命名").trim() || "未命名", value: String(x.value).replace(/\r\n/g, "\n") };
     }
     function packTextItem(it) {
         const x = it || {};
@@ -2032,12 +2235,13 @@
         const plan = { styles: [], rules: [], sys: [], anchors: [], commons: null, kind: "style", anchorGuide: "" };
         /* 小海螺画风包（_v 2）和本插件导出的画风包都可能带 commons；没有这个字段 = 旧包，不动现有挂接 */
         if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.commons)) plan.commons = parsed.commons;
+        plan.tpl = !!(parsed && !Array.isArray(parsed) && parsed._fmt === STYLE_PACK_FMT && Number(parsed._v) >= 2);
         if (parsed && parsed.anchorGuide != null && typeof parsed.anchorGuide !== "string") {
-            throw new Error("公共规则必须是文本");
+            throw new Error("锚点规则必须是文本");
         }
         if (parsed && typeof parsed.anchorGuide === "string") plan.anchorGuide = parsed.anchorGuide.trim();
         if (parsed && parsed._fmt === ANCHOR_GUIDE_PACK_FMT) {
-            if (!plan.anchorGuide) throw new Error("公共规则文件中没有可用的规则文本");
+            if (!plan.anchorGuide) throw new Error("锚点规则文件中没有可用的规则文本");
             plan.kind = "guide";
         } else if (parsed && Array.isArray(parsed.styles)) {
             plan.kind = "style";
@@ -2055,13 +2259,13 @@
             plan.kind = "style";
             plan.styles = [parsed];
         } else {
-            throw new Error("不是可识别的预设包（请选择画风、预设或公共规则 JSON）");
+            throw new Error("不是可识别的预设包（请选择画风、预设或锚点规则 JSON）");
         }
         return plan;
     }
     function packImportText(text) {
         const plan = packPlan(text);
-        /* 旧包的空公共规则表示未携带自定义内容，不能清空现有规则。 */
+        /* 旧包的空锚点规则表示未携带自定义内容，不能清空现有规则。 */
         const guideChanged = !!plan.anchorGuide && plan.anchorGuide !== getAnchorUsageGuide();
         /* 合并计划：每组 {label, list(现有), incoming(清洗后), key(名字字段), valueFields}，算出新增/覆盖/相同 */
         const groups = [];
@@ -2078,12 +2282,15 @@
         const packHasCommon = function (name) {
             return (plan.commons || []).some(function (c) { return c && String(c.name || "").trim() === name; });
         };
-        const withCommon = function (cleaner) {
-            if (!plan.commons) return cleaner;
+        const withMeta = function (cleaner) {
             return function (raw) {
                 const item = cleaner(raw), r = raw || {};
-                const nm = packCommonName[String(r.common)] || String(r.commonName || "").trim();
-                item._cn = nm && (packHasCommon(nm) || localCommonId(nm)) ? nm : "";
+                if (plan.commons) {
+                    const nm = packCommonName[String(r.common)] || String(r.commonName || "").trim();
+                    item._cn = nm && (packHasCommon(nm) || localCommonId(nm)) ? nm : "";
+                }
+                /* 包里的画风带 group 就一起认；没有这个字段的旧包不动本地分组 */
+                if (Object.prototype.hasOwnProperty.call(r, "group")) item._g = String(r.group || "");
                 return item;
             };
         };
@@ -2100,18 +2307,25 @@
             }, "name", ["value"], "commonsJson", null, null));
         }
         if (plan.kind !== "guide") {
-            const sg = mkGroup("画风", getPresets("style"), plan.styles, withCommon(plan.kind === "pack" ? packStyleItem : styleItemFromRaw), "name", ["fixed", "postfix"], PRESETS.style.jsonKey, PRESETS.style.idKey, PRESETS.style.fields);
-            if (plan.commons) {
-                /* 包里新增的公共块此刻还没落地：预演时算「不一样」，落盘时公共块那组先存好，这里再对上本地 id */
-                sg.differs = function (found, incoming) {
+            const sg = mkGroup("画风", getPresets("style"), plan.styles,
+                withMeta(plan.kind === "pack" ? packStyleItem : function (raw) { return styleItemFromRaw(raw, plan.tpl); }),
+                "name", ["value"], PRESETS.style.jsonKey, PRESETS.style.idKey, PRESETS.style.fields);
+            /* 包里新增的公共块此刻还没落地：预演时算「不一样」，落盘时公共块那组先存好，这里再对上本地 id */
+            sg.differs = function (found, incoming) {
+                if (plan.commons) {
                     const want = incoming._cn ? (localCommonId(incoming._cn) || "\u0000new") : "";
-                    return String(found.common || "") !== want;
-                };
-                sg.apply = function (target, incoming) {
+                    if (String(found.common || "") !== want) return true;
+                }
+                return incoming._g != null && String(found.group || "") !== incoming._g;
+            };
+            sg.apply = function (target, incoming) {
+                if (plan.commons) {
                     const id = localCommonId(incoming._cn);
                     if (String(target.common || "") !== id) target.common = id;
-                };
-            }
+                }
+                if (incoming._g != null && String(target.group || "") !== incoming._g) target.group = incoming._g;
+            };
+            sg.kind = "style";
             groups.push(sg);
         }
         if (plan.kind === "pack") {
@@ -2133,14 +2347,14 @@
         });
         const usable = groups.reduce(function (n, g) { return n + g.incoming.length; }, 0);
         if (!usable && !plan.anchorGuide) { setStatus("包里没有可用的预设内容", C_WARN); return; }
-        if (totalAdd === 0 && totalRep === 0 && !guideChanged) { setStatus("文件里的预设和公共规则与现有一致，什么都没变", C_OK); return; }
+        if (totalAdd === 0 && totalRep === 0 && !guideChanged) { setStatus("文件里的预设和锚点规则与现有一致，什么都没变", C_OK); return; }
 
         const lines = ["将导入预设包，按名字合并："];
         groups.forEach(function (g) {
             if (!g.incoming.length) return;
             lines.push("· " + g.label + "：新增 " + g.add + " / 覆盖 " + g.rep + (g.same ? " / 相同 " + g.same : ""));
         });
-        if (guideChanged) lines.push("· 公共规则：替换当前规则（对所有角色锚点生效）");
+        if (guideChanged) lines.push("· 锚点规则：替换当前规则（对所有角色锚点生效）");
         lines.push("同名内容不同的会被覆盖，新增的追加，不会清空现有内容。继续吗？");
         if (totalAdd > 0 || totalRep > 0 || guideChanged) {
             const msg = totalRep > 0
@@ -2172,8 +2386,8 @@
             saveCritical("anchorUsageGuide", plan.anchorGuide === DEFAULT_ANCHOR_GUIDE ? "" : plan.anchorGuide);
             refreshAnchorGuideUI();
         }
-        /* 刷新界面：画风/规则/锚点走预设行；系统提示重建下拉 */
-        ["style", "rules", "anchors"].forEach(function (k) { try { refreshPresetUI(k); } catch (e) {} });
+        /* 当前选中的那套被同名覆盖时，正在生效的内容跟着换成新的；再刷新界面 */
+        ["style", "rules", "anchors"].forEach(function (k) { try { applyPreset(k, activePreset(k)); refreshPresetUI(k); } catch (e) {} });
         try {
             const sysSel = q("#sdg-sys-select"), sysVal = q("#sdg-sys-value");
             if (sysSel) {
@@ -2187,7 +2401,7 @@
         const summaryParts = groups.filter(function (g) { return g.incoming.length; }).map(function (g) {
             return g.label + " 新增" + g.add + "/覆盖" + g.rep;
         });
-        if (guideChanged) summaryParts.push("公共规则已更新");
+        if (guideChanged) summaryParts.push("锚点规则已更新");
         const summary = summaryParts.join("，");
         setStatus("导入完成 ✓ " + summary, C_OK);
         toast("✅ 导入完成：" + summary, true);
@@ -3919,30 +4133,6 @@
         return killed;
     }
 
-    /* 画风段处理：分层生图时把前缀脚手架里的 {Camera}/{Env}/{Mood}/{Chars}/{Outfit}/{Pose}
-       填成当楼层的值（预设包导入的画风前缀就是这种结构）；非分层或仍有未填占位符时整段跳过，
-       绝不把 {Camera} 之类的字面占位符发给站点。 */
-    function styleSegment(seg, layers) {
-        let t = String(seg == null ? "" : seg);
-        if (!t) return "";
-        if (layers && anyLayer(layers)) {
-            const map = { "{Camera}": layers.camera, "{Env}": layers.env, "{Mood}": layers.mood, "{Chars}": layers.chars, "{Outfit}": layers.outfit, "{Pose}": layers.pose, "{Description}": "" };
-            let hadPh = false;
-            TPL_PH_RE.lastIndex = 0;
-            t = t.replace(TPL_PH_RE, function (m) { hadPh = true; return String(map[m] == null ? "" : map[m]); });
-            if (hadPh) {
-                /* 空层值会留下 "Composition: | Setting: |" 空壳，清掉空段 */
-                t = t.split(/[|\n]/).map(function (x) { return x.trim(); }).filter(function (x) {
-                    const ci = x.indexOf(":");
-                    return ci < 0 || x.slice(ci + 1).trim() !== "";
-                }).join(" | ");
-            }
-        }
-        TPL_PH_RE.lastIndex = 0;
-        if (TPL_PH_RE.test(t)) return "";
-        return t.trim();
-    }
-
     async function generateImage(desc, layers) {
         const c = cfg();
         if (!c.genModel) throw new Error("请先填写生图模型");
@@ -5448,22 +5638,26 @@
                             '<button type="button" id="sdg-btn-stop" class="sdg-danger">停止</button>' +
                         '</div>' +
                         '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
-                        '<div id="sdg-layers"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
-                            '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围 / 服装没变化时自动沿用上一楼；↻ 只重摇这一层</div>' +
-                            layerRowsHTML() +
+                        '<div id="sdg-layers-wrap"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
+                            foldHTML("layers", "分层内容",
+                                '<div id="sdg-layers">' +
+                                    '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围 / 服装没变化时自动沿用上一楼；↻ 只重摇这一层</div>' +
+                                    layerRowsHTML() +
+                                '</div>') +
                         '</div>' +
                     '</div>' +
 
                     /* —— 各功能分区：点标题收起 / 展开 —— */
                     foldHTML("style", "🎨 画风",
+                    field("分组", '<select id="sdg-style-group-filter"></select>') +
                     presetRowHTML("style", "画风预设",
-                        '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风 / 预设 / 公共规则）">⬆</button>' +
-                        '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风与公共规则 JSON">⬇</button>' +
+                        '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风 / 预设 / 锚点规则）">⬆</button>' +
+                        '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风、公共块与锚点规则 JSON">⬇</button>' +
                         '<input type="file" id="sdg-style-file" accept=".json,application/json" style="position:absolute;left:-9999px;width:1px;height:1px">') +
+                    field("所属分组", '<select id="sdg-style-group"></select>') +
                     field("挂公共块", '<select id="sdg-style-common"></select>') +
-                    bigField("sdg-gen-fixed", "genFixedPrompt", 3, "例：Korean semi-realistic anime, ultra-detailed digital painting…", "风格词（拼在描述前）") +
-                    bigField("sdg-gen-postfix", "genPostfixPrompt", 2, "例：masterpiece, best quality", "后缀词（拼在描述后）") +
-                    '<div class="sdg-hint">画风只影响出图风格，不会发给副AI；跟下面的「提取规则」是两回事。预设行 ⬆ 导入 JSON、⬇ 导出画风与公共规则，可备份或分享（不含角色锚点、API 与密钥）。公共规则也可在提取页单独导出。</div>') +
+                    bigField("sdg-gen-style", "genStyle", 6, STYLE_DEFAULT, "画风") +
+                    '<div class="sdg-hint">{Description} 描述 · {Common} 公共块 · 分层 {Camera} {Env} {Mood} {Chars} {Outfit} {Pose}。⬆ 导入、⬇ 导出，不含角色锚点、API 与密钥。</div>') +
                     foldHTML("common", "🧩 公共块",
                         field("公共块", '<div class="sdg-siterow">' +
                             '<select id="sdg-common"></select>' +
@@ -5498,14 +5692,14 @@
                     foldHTML("anchors", "🧍 角色锚点",
                     presetRowHTML("anchors", "角色锚点预设") +
                     field("角色锚点", textArea("sdg-anchors", "extAnchors", 3, "角色名：外貌描述……")) +
-                    '<details class="sdg-anchor-guide"><summary>公共规则（所有角色锚点共用）</summary>' +
-                        chk("sdg-anchor-guide-on", "anchorGuideOn", "启用公共规则") +
-                        bigField("sdg-anchor-guide", "anchorUsageGuide", 5, "留空使用默认规则", "公共规则") +
+                    '<details class="sdg-anchor-guide"><summary>锚点规则（所有角色锚点共用）</summary>' +
+                        chk("sdg-anchor-guide-on", "anchorGuideOn", "启用锚点规则") +
+                        bigField("sdg-anchor-guide", "anchorUsageGuide", 5, "留空使用默认规则", "锚点规则") +
                         '<div class="sdg-hint">有角色锚点时随提取请求发送；修改自动保存，留空使用默认规则。</div>' +
                         '<div class="sdg-btns">' +
                             '<button type="button" id="sdg-anchor-guide-reset">恢复默认</button>' +
-                            '<button type="button" id="sdg-anchor-guide-import" title="导入公共规则或预设 JSON">导入 JSON</button>' +
-                            '<button type="button" id="sdg-anchor-guide-export">导出公共规则</button>' +
+                            '<button type="button" id="sdg-anchor-guide-import" title="导入锚点规则或预设 JSON">导入 JSON</button>' +
+                            '<button type="button" id="sdg-anchor-guide-export">导出锚点规则</button>' +
                         '</div>' +
                     '</details>') +
                     foldHTML("template", "🏷️ 注入模板",
@@ -5590,7 +5784,7 @@
         /* 分层工作区 */
         q("#sdg-layered").addEventListener("change", function (ev) {
             save("layered", ev.target.checked);
-            const box = q("#sdg-layers"); if (box) box.style.display = ev.target.checked ? "" : "none";
+            const box = q("#sdg-layers-wrap"); if (box) box.style.display = ev.target.checked ? "" : "none";
             const bar = q("#sdg-layered-bar"); if (bar) bar.classList.toggle("sdg-on", !!ev.target.checked);
         });
         const sdgLBar = q("#sdg-layered-bar"); if (sdgLBar) sdgLBar.classList.toggle("sdg-on", !!cfg().layered);
@@ -5668,7 +5862,7 @@
         q("#sdg-anchor-guide-reset").addEventListener("click", function () {
             saveCritical("anchorUsageGuide", "");
             refreshAnchorGuideUI();
-            setStatus("公共规则已恢复默认 ✓", C_OK);
+            setStatus("锚点规则已恢复默认 ✓", C_OK);
         });
         q("#sdg-anchor-guide-import").addEventListener("click", stylePickAndImport);
         q("#sdg-anchor-guide-export").addEventListener("click", function () { styleExportFile(true); });
@@ -6118,8 +6312,8 @@
             parseLayers, mergeLayers, joinLayers, layerContract, isNoChange,
             injectDescToMessage, reinjectDescToMessage, renderFloorImage, renderAllImages,
             getProfiles, activeProfile, refreshSiteUI, getPresets, activePreset, refreshPresetUI, getImage, getImageCount, getImageCur, setImage, stepImage, replaceMarkersInDom,
-            normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleSegment,
-            imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, packTemplateSplit, getCommons, buildFinalPrompt, styleCommonText, applyCommonPlaceholder, refreshCommonUI, packSixTagText, stylePackBuild, getSystemPrompts, getAnchorUsageGuide, anchorGuidePackBuild,
+            normalizeGenSize, siteErrorBrief, formatGenError, pickJsonBlock, styleLineRest, styleOptionsHTML, refreshStyleGroupUI, setStyleGroupChoice, styleGroupFilter,
+            imgUrlFromChat, imgUrlFromGen, packPlan, packImportText, getCommons, buildStyleCore, fillStyle, styleValueFromParts, styleGroupOf, styleGroups, buildFinalPrompt, styleCommonText, applyCommonPlaceholder, refreshCommonUI, packSixTagText, stylePackBuild, getSystemPrompts, getAnchorUsageGuide, anchorGuidePackBuild,
             trimSourceText, tagInner, tagRegex, syncSwipeExtra, restoreSwipeExtra, isNoChange, stripImageTag, injectRecord, markerPairs, replaceMarkersAcrossNodes, htmlMarkerRegexes, sdgFileTime, dropExpiredRefs, cleanupOldImages,
             genImageUnified, isModerationBlock, dropFloorImages, hasAnyImage, dropIfMarkersGone, healRecoveredUrl, healChatRecoveredRefs, applyKeepCutoff, sweepExternalLinks, replaceGalleryRef,
             parseChatResponse, callSubAI, runExtract, onStop, persistChat, generateForFloor, onRegenFloor,

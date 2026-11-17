@@ -54,8 +54,8 @@ test('导入小海螺画风包：公共块单独存，画风正文不动，各�
         { id: 't5', name: '认不出', value: 'y', common: 'stale', commonName: '不存在' },
     ]));
     assert.deepEqual(clone(f.debug.getCommons().map(b => [b.name, b.value])), [['夹心糖', COMMON], ['棒棒糖', HANFU]]);
-    assert.equal(f.style('透甜氧气').fixed, 'Composition: {Camera}\nSetting: {Env}');
-    assert.equal(f.style('透甜氧气').postfix, 'soft pastel, airy light', '公共块没有并进画风正文');
+    assert.equal(f.style('透甜氧气').value, TPL, '整张模板原样进来，公共块没有并进画风正文');
+    assert.equal(f.style('透甜氧气').group, '质感', '分组一起带进来');
     assert.equal(f.style('透甜氧气').common, f.common('夹心糖').id);
     assert.equal(f.style('古风').common, f.common('棒棒糖').id);
     assert.equal(f.style('不挂的').common || '', '');
@@ -107,15 +107,15 @@ test('删公共块：挂着它的画风改为不挂，别的画风不受影响',
     assert.equal(f.style('丙').common, f.common('棒棒糖').id);
 });
 
-test('拼提示词：风格词 → 描述 → 画风正文 → 公共块（空一行）；不挂就不拼', t => {
+test('拼提示词：场景分层 → 画风正文 → 公共块（空一行）；不挂就不拼', t => {
     const f = fixture(t);
     f.debug.packImportText(ipePack([{ id: 't1', name: '挂', value: TPL, common: 'common_a' }, { id: 't2', name: '不挂', value: TPL, common: '' }]));
     f.useStyle('挂');
     const layers = { camera: 'medium shot', env: 'cafe', mood: '', chars: '', outfit: '', pose: '' };
-    assert.equal(f.debug.buildFinalPrompt('a girl', layers), 'Composition: medium shot | Setting: cafe, a girl, soft pastel, airy light\n\n' + COMMON);
-    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'a girl, soft pastel, airy light\n\n' + COMMON, '没分层时风格词脚手架整段跳过，公共块照拼');
+    assert.equal(f.debug.buildFinalPrompt('a girl', layers), 'Composition: medium shot\nSetting: cafe\nsoft pastel, airy light\n\n' + COMMON);
+    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'Composition: a girl\nsoft pastel, airy light\n\n' + COMMON, '没分层时整段填进占位符那一片，公共块照拼');
     f.useStyle('不挂');
-    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'a girl, soft pastel, airy light');
+    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'Composition: a girl\nsoft pastel, airy light');
 });
 
 test('画风里写了 {Common}：放在那个位置；没挂时占位符去掉，不发字面量', t => {
@@ -124,11 +124,11 @@ test('画风里写了 {Common}：放在那个位置；没挂时占位符去掉�
         { id: 't1', name: '有', value: 'soft pastel\n{Common}\nfinal touch', common: 'common_b' },
         { id: 't2', name: '无', value: 'soft pastel\n{Common}\nfinal touch', common: '' },
     ]));
-    assert.ok(f.style('有').postfix.includes('{Common}'), '占位符原样留在画风里');
+    assert.ok(f.style('有').value.includes('{Common}'), '占位符原样留在画风里');
     f.useStyle('有');
-    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'a girl, soft pastel\n' + HANFU + '\nfinal touch');
+    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'soft pastel\n' + HANFU + '\nfinal touch, a girl');
     f.useStyle('无');
-    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'a girl, soft pastel\nfinal touch');
+    assert.equal(f.debug.buildFinalPrompt('a girl', null), 'soft pastel\nfinal touch, a girl');
 });
 
 test('画风正文里已经带着同一段公共文本（空白不同也算）：不再叠一份', t => {
@@ -152,8 +152,8 @@ test('改公共块内容：所有挂着它的画风下一次出图就用新内�
     globalThis.fetch = f.w.fetch;
     for (const name of ['甲', '乙']) { f.useStyle(name); try { await f.debug.generateImage('a girl', null); } catch (e) {} }
     const prompts = sent.map(b => b.prompt).filter(Boolean);
-    assert.equal(prompts[0], 'a girl, style A\n\nNEW COMMON LINE');
-    assert.equal(prompts[1], 'a girl, style B\n\nNEW COMMON LINE');
+    assert.equal(prompts[0], 'style A, a girl\n\nNEW COMMON LINE');
+    assert.equal(prompts[1], 'style B, a girl\n\nNEW COMMON LINE');
 });
 
 test('老版本导过、没挂公共块的画风：重新导同一个包按同名覆盖挂上；再导一次什么都不变', t => {
@@ -175,7 +175,7 @@ test('旧包（没有 commons 字段）：不动现有公共块和挂接', t => 
     f.debug.packImportText(ipePack([{ id: 't1', name: '透甜氧气', value: TPL, common: 'common_a' }]));
     const mounted = f.style('透甜氧气').common;
     f.debug.packImportText(ipePack([{ id: 't1', name: '透甜氧气', value: TPL + ', v2' }], null));
-    assert.equal(f.style('透甜氧气').postfix, 'soft pastel, airy light, v2');
+    assert.equal(f.style('透甜氧气').value, TPL + ', v2');
     assert.equal(f.style('透甜氧气').common, mounted, '挂接保留');
     assert.equal(f.debug.getCommons().length, 2);
 });
@@ -202,15 +202,15 @@ test('同名公共块内容不同：按名字覆盖并提示；导出再导入�
 test('提取页分区：默认全收起，点开后记住；工作区不在折叠里', t => {
     const f = fixture(t);
     const folds = Array.from(f.w.document.querySelectorAll('#sdg-pane-ext details.sdg-fold'));
-    assert.deepEqual(folds.map(d => d.getAttribute('data-fold')), ['style', 'common', 'site', 'sys', 'rules', 'anchors', 'template', 'misc']);
+    assert.deepEqual(folds.map(d => d.getAttribute('data-fold')), ['layers', 'style', 'common', 'site', 'sys', 'rules', 'anchors', 'template', 'misc']);
     assert.ok(folds.every(d => !d.open), '默认全收起');
     assert.equal(f.$('#sdg-preview').closest('details'), null);
     assert.equal(f.$('#sdg-btn-extract').closest('details'), null);
     assert.equal(f.w.document.querySelectorAll('#sdg-pane-gen details.sdg-fold').length, 0, '生图页不动');
-    const where = { '#sdg-style': 'style', '#sdg-style-common': 'style', '#sdg-common-text': 'common', '#sdg-ext-api': 'site', '#sdg-ext-model-sel': 'site', '#sdg-sys-value': 'sys', '#sdg-rules': 'rules', '#sdg-anchors': 'anchors', '#sdg-anchor-guide': 'anchors', '#sdg-template': 'template', '#sdg-timeout': 'misc' };
+    const where = { '#sdg-style': 'style', '#sdg-style-common': 'style', '#sdg-gen-style': 'style', '#sdg-style-group': 'style', '#sdg-style-group-filter': 'style', '#sdg-layer-env': 'layers', '#sdg-common-text': 'common', '#sdg-ext-api': 'site', '#sdg-ext-model-sel': 'site', '#sdg-sys-value': 'sys', '#sdg-rules': 'rules', '#sdg-anchors': 'anchors', '#sdg-anchor-guide': 'anchors', '#sdg-template': 'template', '#sdg-timeout': 'misc' };
     for (const sel in where) assert.equal(f.$(sel).closest('details.sdg-fold').getAttribute('data-fold'), where[sel], sel);
 
-    const site = folds[2];
+    const site = f.$('details[data-fold="site"]');
     site.open = true; site.dispatchEvent(new f.w.Event('toggle'));
     assert.deepEqual(clone(f.settings.foldsOpen), { site: true });
     const reloaded = fixture(t, clone(f.settings));
