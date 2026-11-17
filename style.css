@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.23 */
+/* 生图工坊 · DrawGen v1.8.24 */
 
 /* ============================================================
    主题变量：夜版默认，日版覆盖
@@ -212,6 +212,29 @@
 .sdg-anchor-guide > summary { cursor: pointer; color: var(--sdg-fg); }
 .sdg-anchor-guide[open] > summary { margin-bottom: 8px; }
 
+/* —— 提取页分区折叠 —— */
+.sdg-fold {
+    margin-top: 8px;
+    border: 1px solid var(--sdg-line);
+    border-radius: 8px;
+}
+.sdg-fold > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--sdg-fg);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+}
+.sdg-fold > summary::-webkit-details-marker { display: none; }
+.sdg-fold > summary::after { content: "▸"; color: var(--sdg-fg2); }
+.sdg-fold[open] > summary::after { content: "▾"; }
+.sdg-fold > .sdg-fold-body { padding: 0 10px 10px; }
+
 /* —— 分层工作区 —— */
 #sdg-layers {
     display: grid;
@@ -291,37 +314,6 @@
     color: var(--sdg-fg2);
     letter-spacing: 0.04em;
 }
-/* 提取页功能分区：原生 details 支持键盘与触屏，面板不重绘时各自保持展开状态 */
-#sdg-pane-ext > .sdg-fold {
-    margin: 8px 0;
-    border: 1px solid var(--sdg-line);
-    border-radius: 8px;
-    background: var(--sdg-bg);
-    overflow: hidden;
-}
-#sdg-pane-ext > .sdg-fold > summary {
-    min-height: 40px;
-    padding: 9px 11px;
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    cursor: pointer;
-    user-select: none;
-    color: var(--sdg-fg);
-    font-size: 13px;
-    font-weight: 700;
-    list-style: none;
-}
-#sdg-pane-ext > .sdg-fold > summary::-webkit-details-marker { display: none; }
-#sdg-pane-ext > .sdg-fold > summary::before { content: "▸"; color: var(--sdg-fg2); font-size: 14px; }
-#sdg-pane-ext > .sdg-fold[open] > summary::before { content: "▾"; }
-#sdg-pane-ext > .sdg-fold > summary:hover { background: var(--sdg-accent-soft); }
-#sdg-pane-ext > .sdg-fold > summary:focus-visible { outline: 2px solid var(--sdg-accent); outline-offset: -2px; }
-#sdg-pane-ext > .sdg-fold > .sdg-fold-body {
-    padding: 8px 10px 10px;
-    border-top: 1px solid var(--sdg-line);
-}
-#sdg-pane-ext > .sdg-fold > .sdg-fold-body > .sdg-work { margin-top: 0; }
 .sdg-field { margin: 5px 0 0; }
 .sdg-field label {
     display: block;
