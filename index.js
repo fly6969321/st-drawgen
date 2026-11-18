@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.25
+ *  生图工坊 · DrawGen v1.8.26
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -125,12 +125,14 @@
  *    （场景分层 → 画风正文 → 公共块，{Description} 只拿没单独放置的层）；小海螺画风包整张原样导入。
  *    ②画风分组：导入带进来，可改所属分组，下拉按组筛选。③分层内容可收起。
  *    ④「公共规则」改名「锚点规则」（免得和公共块混）。
+ *  · v1.8.26 ①一次导入很多预设不再撞编号（撞了的开机自动换新号）。②分层提取的开关挪进「分层提取」折叠栏。
+ *    ③只走 images 接口时，报错后面不再跟一句「按地址直连 images 接口」。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.25";
+    const VERSION = "1.8.26";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1469,6 +1471,19 @@
                 if (Number(st.autoDelay) === 1800) st.autoDelay = 800;
                 st.sdgDelayFast171 = true;
             }
+            /* 1.8.26：以前一次导入很多预设时会有几个撞上同一个编号（选的是甲、用的是乙）。
+               同一张表里编号重复的，后面那几个换新编号；内容一个字不动。 */
+            ["stylesJson", "rulesJson", "anchorsJson", "commonsJson", "extSystemPromptsJson"].forEach(function (k) {
+                const list = safeJson(st[k], null);
+                if (!Array.isArray(list)) return;
+                const seen = {}; let fixed = 0;
+                list.forEach(function (p) {
+                    if (!p || !p.id) return;
+                    if (seen[p.id]) { p.id = newId(); fixed++; }
+                    seen[p.id] = true;
+                });
+                if (fixed) { st[k] = JSON.stringify(list); log("已给 " + fixed + " 个撞号的预设换了新编号：", k); }
+            });
         } catch (e) { console.error(LOG, "loadSettings:", e); }
     }
 
@@ -1511,7 +1526,9 @@
     function curModel(kind) { return String(cfg()[PROF_FIELDS[kind][modelField(kind)]] || ""); }
     function profJsonKey(kind) { return kind === "gen" ? "genProfilesJson" : "extProfilesJson"; }
     function profIdKey(kind) { return kind === "gen" ? "genProfileId" : "extProfileId"; }
-    function newId() { return "s" + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36); }
+    /* 同一毫秒里连建多个（一次导入两百多个画风）时，光靠时间戳 + 三位随机数会撞号；尾巴再接一个只增不减的序号 */
+    let idSeq = 0;
+    function newId() { return "s" + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36) + "_" + (++idSeq).toString(36); }
 
     function snapshotProfile(kind, name) {
         const map = PROF_FIELDS[kind], c = cfg(), p = { id: newId(), name: name || "站点1", models: [] };
@@ -3792,7 +3809,6 @@
         let wouldFallback = false;                          /* 若无开关限制本来会退 images 的场景（报错文案用） */
         let retryLeft = retryOnce ? 1 : 0;                  /* 本次失败重试预算：最多自动追加一发 */
         if (imagesOnly) {
-            lastErr = "按地址直连 images 接口";
             canFallback = true;
         } else if (c.genProxy && ctx() && typeof ctx().getRequestHeaders === "function") {
             /* 酒馆后端代理通道：仅 chat，无 images 兜底；请求体保持后端约定原样 */
@@ -3900,12 +3916,12 @@
                 const u2 = imgUrlFromGen(result2);
                 if (u2) { const img2 = await normalizeImageToDataUrl(u2, ctl.signal); ctl.dispose(); return { image: img2, prompt: finalPrompt, via: "generations" }; }
                 ctl.dispose();
-                throw new Error("images 接口响应未包含图片 / " + lastErr);
+                throw new Error("images 接口响应未包含图片" + (lastErr ? " / " + lastErr : ""));
             }
             ctl.dispose();
             throw new Error("images 接口 " + siteErrorBrief(resp2.status, why2)
                 + (b64Rejected && !retryOnce ? "（未自动改发重试；可在设置打开「失败重试」）" : "")
-                + " / " + lastErr);
+                + (lastErr ? " / " + lastErr : ""));
         } catch (e) {
             ctl.dispose();
             const ae = genAbortError(ctl); if (ae) throw ae;
@@ -5637,14 +5653,14 @@
                             '<button type="button" id="sdg-btn-generate" class="sdg-primary">生图</button>' +
                             '<button type="button" id="sdg-btn-stop" class="sdg-danger">停止</button>' +
                         '</div>' +
-                        '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
-                        '<div id="sdg-layers-wrap"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
-                            foldHTML("layers", "分层内容",
+                        foldHTML("layers", "分层提取",
+                            '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
+                            '<div id="sdg-layers-wrap"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
                                 '<div id="sdg-layers">' +
                                     '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围 / 服装没变化时自动沿用上一楼；↻ 只重摇这一层</div>' +
                                     layerRowsHTML() +
-                                '</div>') +
-                        '</div>' +
+                                '</div>' +
+                            '</div>') +
                     '</div>' +
 
                     /* —— 各功能分区：点标题收起 / 展开 —— */

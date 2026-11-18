@@ -307,6 +307,15 @@ test('生成通道=images：直接只打 images 接口，不先白打 chat', asy
     assert.match(f.calls[0].url, /images\/generations$/);
 });
 
+test('生成通道=images：站点报错时只显示站点原话，后面不跟别的', async t => {
+    const f = fixture(t, { genChannel: 'images' });
+    f.respond(() => f.response({ error: { message: 'No available compatible accounts', type: 'api_error' } }, 503));
+    let err;
+    await f.finish(f.debug.genImageUnified('a cat')).catch(e => { err = e; });
+    assert.equal(f.calls.length, 1, '只发一次请求');
+    assert.equal(f.debug.formatGenError(err), '生图失败 503（images）：No available compatible accounts (api_error)');
+});
+
 test('生成通道=chat：只打 chat，站点 400 也不退 images', async t => {
     const f = fixture(t, { genChannel: 'chat' });
     f.respond(() => f.response({ error: { message: 'This model is not supported on the Chat Completions endpoint' } }, 400));

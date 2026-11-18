@@ -192,13 +192,15 @@ test('1.8.24 及以前导出的画风包（前缀 / 后缀两格）照样能导'
     assert.equal(f.style('旧包2').value, 'Setting: {Env}\nx');
 });
 
-test('分层内容可收起：在折叠区里；关掉分层提取整块隐藏', t => {
+test('分层提取开关和分层内容在同一个折叠栏里；关掉开关只藏内容', t => {
     const f = fixture(t, { layered: true });
     const fold = f.$('#sdg-layers').closest('details.sdg-fold');
     assert.equal(fold.getAttribute('data-fold'), 'layers');
     assert.equal(fold.open, false);
     assert.equal(f.$('#sdg-layers-wrap').style.display, '');
-    assert.equal(f.$('#sdg-layered').closest('details'), null, '分层开关本身不在折叠里');
+    assert.equal(f.$('#sdg-layered').closest('details'), fold, '分层开关在「分层提取」折叠栏里');
+    assert.equal(fold.querySelector('summary').textContent, '分层提取');
+    assert.equal(f.$('#sdg-layers-wrap').contains(f.$('#sdg-layered')), false, '关掉后开关自己还看得见');
     fold.open = true; fold.dispatchEvent(new f.w.Event('toggle'));
     assert.equal(f.settings.foldsOpen.layers, true);
     const el = f.$('#sdg-layered'); el.checked = false; el.dispatchEvent(new f.w.Event('change', { bubbles: true }));
@@ -216,4 +218,20 @@ test('面板里只有「锚点规则」，没有「公共规则」', t => {
     assert.doesNotMatch(all, /公共规则/);
     assert.match(all, /锚点规则/);
     assert.match(all, /公共块/);
+});
+
+test('一次导入几百个画风：编号一个不撞；旧数据里撞号的开机换新号', t => {
+    const f = fixture(t);
+    const styles = Array.from({ length: 400 }, (_, i) => ({ name: '批量' + i, value: 'v' + i + ' {Description}' }));
+    f.debug.packImportText(JSON.stringify({ _fmt: 'drawgen-style-pack', _v: 2, styles }));
+    const list = JSON.parse(f.settings.stylesJson);
+    assert.ok(list.length >= 400);
+    assert.equal(new Set(list.map(p => p.id)).size, list.length);
+    const dup = clone(f.settings);
+    const l2 = JSON.parse(dup.stylesJson); l2[5].id = l2[4].id; l2[9].id = l2[4].id; dup.stylesJson = JSON.stringify(l2);
+    const g = fixture(t, dup);
+    const healed = JSON.parse(g.settings.stylesJson);
+    assert.equal(new Set(healed.map(p => p.id)).size, healed.length);
+    assert.equal(healed[4].id, l2[4].id, '先出现的那个编号不变');
+    assert.deepEqual(healed.map(p => p.value), l2.map(p => p.value), '内容一个字不动');
 });
