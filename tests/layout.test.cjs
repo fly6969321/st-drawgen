@@ -20,19 +20,22 @@ function sheet(t) {
     return { dom, rules: dom.window.document.styleSheets[0].cssRules };
 }
 
+/* 面板的规则都收在 @layer sdg 里：找规则时把层 / 媒体查询一并摊开 */
+function flat(rules, media) {
+    const out = [];
+    for (const r of rules) {
+        if (r.selectorText) out.push({ rule: r, media: media || '' });
+        else if (r.cssRules) out.push(...flat(r.cssRules, r.media ? (r.conditionText || r.media.mediaText) : (media || '')));
+    }
+    return out;
+}
 function findRule(rules, selector) {
-    for (const r of rules) if (r.selectorText === selector) return r;
+    for (const x of flat(rules)) if (!x.media && x.rule.selectorText === selector) return x.rule;
     return null;
 }
 
 function findInMedia(rules, mediaNeedle, selectorNeedle) {
-    for (const r of rules) {
-        const text = r.media ? (r.conditionText || r.media.mediaText) : '';
-        if (!text.includes(mediaNeedle)) continue;
-        for (const inner of r.cssRules) {
-            if ((inner.selectorText || '').includes(selectorNeedle)) return inner;
-        }
-    }
+    for (const x of flat(rules)) if (x.media.includes(mediaNeedle) && x.rule.selectorText.includes(selectorNeedle)) return x.rule;
     return null;
 }
 
@@ -58,7 +61,7 @@ test('.sdg-field puts no gap under the input, so field bottom == input bottom', 
 
     /* 这条选择器是多行写的，jsdom 会原样保留换行，所以按特征找而不是全串比对 */
     let inputs = null;
-    for (const r of rules) {
+    for (const r of flat(rules).map(x => x.rule)) {
         const sel = r.selectorText || '';
         if (sel.includes('input[type="number"]') && sel.includes('textarea')) { inputs = r; break; }
     }
@@ -115,7 +118,8 @@ test('grid cells really end on the same line once rendered', t => {
         assert.equal(cell.lastElementChild.tagName, 'INPUT', '第 ' + (i + 1) + ' 格最后一个元素是输入框');
         assert.equal(cell.firstElementChild.tagName, 'LABEL');
     });
-    assert.equal(d.defaultView.getComputedStyle(d.querySelector('.sdg-grid2')).alignItems, 'end');
+    /* 规则在 @layer 里，jsdom 不算层叠层，这里直接看规则本身 */
+    assert.equal(findRule(dom.window.document.styleSheets[0].cssRules, '.sdg-grid2').style.alignItems, 'end');
 });
 
 test('inline floor images override host sticky positioning and scroll snapping', t => {
@@ -171,4 +175,38 @@ test('version is consistent across manifest, package and source', t => {
     assert.ok(/^\d+\.\d+\.\d+$/.test(manifest.version));
     const css1 = css.match(/DrawGen v([\d.]+)/);
     assert.ok(css1 && css1[1] === manifest.version, 'style.css 头注释版本一致');
+});
+
+test('面板 / 大编辑面板 / 悬浮球的样式锁死：规则都在 @layer sdg 里且全部 !important', t => {
+    const { rules } = sheet(t);
+    const first = rules[0];
+    assert.equal(first.constructor.name, 'CSSLayerStatementRule');
+    assert.deepEqual(Array.from(first.nameList), ['sdg', 'sdg-reset'], '先声明的层在 !important 里优先：插件规则压得过清零层');
+    let inLayer = 0;
+    const walk = (list, layer) => {
+        for (const r of list) {
+            const name = r.constructor.name === 'CSSLayerBlockRule' ? r.name : layer;
+            if (r.selectorText) {
+                const panel = /#sdg-(panel|editor|ball)\b/.test(r.selectorText);
+                if (panel) assert.ok(layer, r.selectorText + ' 必须写在层里');
+                if (layer) {
+                    inLayer++;
+                    /* jsdom 把简写拆开后，个别被顺带重置的子属性（border-image 之类）不带优先级标记，按写出来的文本数 */
+                    const text = r.style.cssText.replace(/url\("[^"]*"\)/g, 'url()');
+                    const decls = text.split(';').map(x => x.trim()).filter(Boolean);
+                    assert.ok(decls.length > 0);
+                    for (const decl of decls) assert.match(decl, /!important$/, r.selectorText + ' 的「' + decl + '」必须带 !important');
+                }
+            } else if (r.cssRules) walk(r.cssRules, name);
+        }
+    };
+    walk(rules, '');
+    assert.ok(inLayer > 100);
+    const reset = Array.from(rules).find(r => r.constructor.name === 'CSSLayerBlockRule' && r.name === 'sdg-reset');
+    assert.equal(reset.cssRules[0].selectorText, '#sdg-panel, #sdg-editor, #sdg-ball');
+    assert.equal(reset.cssRules[0].style.getPropertyValue('all'), 'initial');
+    assert.equal(reset.cssRules[1].style.getPropertyValue('all'), 'revert');
+    /* 楼层里的图、扩展抽屉入口照旧跟酒馆走，不进层 */
+    for (const r of rules) if (r.selectorText) assert.ok(!/#sdg-(panel|editor|ball)\b/.test(r.selectorText));
+    assert.ok(Array.from(rules).some(r => r.selectorText === '.sdg-genbtn'));
 });

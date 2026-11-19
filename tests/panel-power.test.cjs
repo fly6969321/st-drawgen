@@ -90,3 +90,29 @@ test('重新加载后顶栏反映已保存的状态', t => {
     assert.equal(d.querySelector('#sdg-power').checked, false, '插件关闭时滑块在关位');
     assert.ok(d.querySelector('#sdg-ball-toggle').classList.contains('sdg-ball-off'), '悬浮球隐藏时图标变暗');
 });
+
+test('点悬浮球开面板：紧跟着补发的那一下点击不会勾到面板里的勾选框', t => {
+    const f = fixture(t, { showBall: true, genRetryOnce: false });
+    const d = f.w.document, ball = d.querySelector('#sdg-ball'), panel = d.querySelector('#sdg-panel');
+    const box = d.querySelector('#sdg-gen-retry');
+    const tapBall = () => { ball.dispatchEvent(new f.w.Event('pointerdown', { bubbles: true })); ball.dispatchEvent(new f.w.Event('pointerup', { bubbles: true })); };
+    tapBall();
+    assert.equal(panel.classList.contains('show'), true, '点球打开面板');
+    box.click();                       /* 手机上浏览器补发的 click 落在球底下的勾选框上 */
+    assert.equal(box.checked, false, '这一下被吞掉');
+    assert.equal(f.settings.genRetryOnce, false);
+    box.click();                       /* 之后她自己点，照常生效 */
+    assert.equal(box.checked, true);
+    assert.equal(f.settings.genRetryOnce, true);
+    tapBall();
+    assert.equal(panel.classList.contains('show'), false, '再点球关面板');
+    d.querySelector('#sdg-gen-retry').closest('label').click();
+    assert.equal(box.checked, true, '关面板后补发的点击同样不生效');
+});
+
+test('「失败后自动重试一次」「走酒馆后端代理」在生图页最底部', t => {
+    const f = fixture(t, {});
+    const labels = Array.from(f.w.document.querySelectorAll('#sdg-pane-gen > label.sdg-chk')).map(l => l.querySelector('input').id);
+    assert.deepEqual(labels.slice(-2), ['sdg-gen-retry', 'sdg-gen-proxy']);
+    assert.equal(f.w.document.querySelector('#sdg-pane-gen').lastElementChild.querySelector('input').id, 'sdg-gen-proxy');
+});

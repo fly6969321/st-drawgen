@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.26
+ *  生图工坊 · DrawGen v1.8.27
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -127,12 +127,15 @@
  *    ④「公共规则」改名「锚点规则」（免得和公共块混）。
  *  · v1.8.26 ①一次导入很多预设不再撞编号（撞了的开机自动换新号）。②分层提取的开关挪进「分层提取」折叠栏。
  *    ③只走 images 接口时，报错后面不再跟一句「按地址直连 images 接口」。
+ *  · v1.8.27 ①面板 / 大编辑面板 / 悬浮球的样式锁死，不跟酒馆美化走（见 style.css 头注释）。
+ *    ②点悬浮球开面板时，不再顺带点到面板里正好在球底下的那个勾选框。
+ *    ③「失败后自动重试一次」「走酒馆后端代理」挪到生图页最底部。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.26";
+    const VERSION = "1.8.27";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -1349,6 +1352,13 @@
     function ctx() { return SillyTavern.getContext(); }
     function q(s) { try { return document.querySelector(s); } catch (e) { return null; } }
     function qa(s) { try { return Array.prototype.slice.call(document.querySelectorAll(s)); } catch (e) { return []; } }
+    /* 面板、大编辑面板、悬浮球的样式在 style.css 里是锁死的（酒馆美化改不动，见那边的头注释），
+       普通的内联样式同样压不过它；给这三块里的元素设内联样式一律走这里（带 important）。val 传空 = 撤掉。 */
+    function setCss(el, prop, val) {
+        if (!el) return;
+        if (val == null || val === "") el.style.removeProperty(prop);
+        else el.style.setProperty(prop, String(val), "important");
+    }
 
     function esc(s) {
         if (s == null) return "";
@@ -2431,7 +2441,7 @@
 
     const C_OK = "var(--sdg-ok)", C_ERR = "var(--sdg-err)", C_WARN = "var(--sdg-warn)", C_DIM = "var(--sdg-dim)";    function setStatus(t, color) {
         const e = q("#sdg-status");
-        if (e) { e.textContent = t; e.style.color = color || ""; }
+        if (e) { e.textContent = t; setCss(e, "color", color || ""); }
     }
     function setPreview(t) {
         const e = q("#sdg-preview");
@@ -5337,6 +5347,7 @@
     /* ============================================================
        界面：悬浮球
        ============================================================ */
+    let ballTapAt = 0;
     function createBall() {
         let ball = q("#sdg-ball");
         if (ball) return ball;
@@ -5347,8 +5358,8 @@
         document.body.appendChild(ball);
 
         const c = cfg();
-        if (c.ballLeft) ball.style.left = c.ballLeft;
-        if (c.ballTop) ball.style.top = c.ballTop;
+        if (c.ballLeft) setCss(ball, "left", c.ballLeft);
+        if (c.ballTop) setCss(ball, "top", c.ballTop);
         applyBallVisible();
 
         let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
@@ -5364,20 +5375,29 @@
             const dx = ev.clientX - sx, dy = ev.clientY - sy;
             if (Math.abs(dx) + Math.abs(dy) > 6) moved = true;
             if (moved) {
-                ball.style.left = Math.max(0, ox + dx) + "px";
-                ball.style.top = Math.max(0, oy + dy) + "px";
+                setCss(ball, "left", Math.max(0, ox + dx) + "px");
+                setCss(ball, "top", Math.max(0, oy + dy) + "px");
             }
         });
         ball.addEventListener("pointerup", function () {
             dragging = false;
             if (moved) { save("ballLeft", ball.style.left); save("ballTop", ball.style.top); }
-            else togglePanel();
+            else { ballTapAt = Date.now(); togglePanel(); }
         });
+        /* 点球开面板后，浏览器紧跟着补发的那一下 click 会落到刚弹出来、正好盖在球上的面板里
+           （手机上：球底下是个勾选框就被勾上了）。点球后的一小段时间里，把这一下 click 吞掉。 */
+        window.addEventListener("click", function (ev) {
+            if (!ballTapAt || Date.now() - ballTapAt > 500) return;
+            ballTapAt = 0;
+            if (ev.target === ball) return;
+            ev.preventDefault(); ev.stopPropagation();
+            if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+        }, true);
         return ball;
     }
     function applyBallVisible() {
         const ball = q("#sdg-ball");
-        if (ball) ball.style.display = cfg().showBall === false ? "none" : "";
+        if (ball) setCss(ball, "display", cfg().showBall === false ? "none" : "");
     }
 
     /* ============================================================
@@ -5473,7 +5493,7 @@
             document.body.appendChild(mask);
             const ta = mask.querySelector(".sdg-editor-ta");
             const card = mask.querySelector(".sdg-editor-card");
-            const close = function () { mask.style.display = "none"; };
+            const close = function () { setCss(mask, "display", "none"); };
             const save = function () {
                 const tg = mask.__target;
                 if (tg) { tg.value = ta.value; fireChange(tg); }
@@ -5484,17 +5504,17 @@
                 try {
                     const vp = sdgViewport();
                     if (!(vp.vw > 0) || !(vp.vh > 0)) return;
-                    mask.style.position = "fixed";
-                    mask.style.left = vp.ol + "px";
-                    mask.style.top = vp.ot + "px";
-                    mask.style.width = vp.vw + "px";
-                    mask.style.height = vp.vh + "px";
-                    mask.style.right = "auto";
-                    mask.style.bottom = "auto";
-                    card.style.width = Math.min(860, Math.floor(vp.vw * 0.94)) + "px";
-                    card.style.height = Math.min(720, Math.floor(vp.vh * 0.88)) + "px";
-                    card.style.maxWidth = "94%";
-                    card.style.maxHeight = "94%";
+                    setCss(mask, "position", "fixed");
+                    setCss(mask, "left", vp.ol + "px");
+                    setCss(mask, "top", vp.ot + "px");
+                    setCss(mask, "width", vp.vw + "px");
+                    setCss(mask, "height", vp.vh + "px");
+                    setCss(mask, "right", "auto");
+                    setCss(mask, "bottom", "auto");
+                    setCss(card, "width", Math.min(860, Math.floor(vp.vw * 0.94)) + "px");
+                    setCss(card, "height", Math.min(720, Math.floor(vp.vh * 0.88)) + "px");
+                    setCss(card, "max-width", "94%");
+                    setCss(card, "max-height", "94%");
                 } catch (e) {}
             };
             mask.__place = place;
@@ -5520,7 +5540,7 @@
         const pnl = q("#sdg-panel");
         mask.setAttribute("data-theme", (pnl && pnl.getAttribute("data-theme")) || "night");
         mask.__ta.value = target.value != null ? target.value : "";
-        mask.style.display = "flex";
+        setCss(mask, "display", "flex");
         if (mask.__place) mask.__place();
         setTimeout(function () { try { if (mask.__place) mask.__place(); mask.__ta.focus(); } catch (e) {} }, 30);
     }
@@ -5621,8 +5641,6 @@
                         '<option value="chat"' + (genCh === "chat" ? " selected" : "") + '>只用 chat/completions</option>' +
                         '<option value="images"' + (genCh === "images" ? " selected" : "") + '>只用 images/generations</option>' +
                     '</select>') +
-                    chk("sdg-gen-retry", "genRetryOnce", "失败后自动重试一次") +
-                    chk("sdg-gen-proxy", "genProxy", "走酒馆后端代理（绕跨域）") +
 
                     '<h5>自动化</h5>' +
                     chk("sdg-auto-extract", "autoExtract", "收到回复后自动提取") +
@@ -5641,6 +5659,8 @@
                     '<h5>插件</h5>' +
                     chk("sdg-enabled", "enabled", "启用生图工坊") +
                     chk("sdg-show-ball", "showBall", "显示悬浮球") +
+                    chk("sdg-gen-retry", "genRetryOnce", "失败后自动重试一次") +
+                    chk("sdg-gen-proxy", "genProxy", "走酒馆后端代理（绕跨域）") +
                 '</section>' +
 
                 /* ========== 提取页（工作区在这里） ========== */
@@ -5655,7 +5675,7 @@
                         '</div>' +
                         foldHTML("layers", "分层提取",
                             '<label class="sdg-chk sdg-layered-bar" id="sdg-layered-bar"><span class="sdg-layered-txt">分层提取</span><input type="checkbox" id="sdg-layered"' + (cfg().layered ? " checked" : "") + '></label>' +
-                            '<div id="sdg-layers-wrap"' + (cfg().layered ? "" : ' style="display:none"') + '>' +
+                            '<div id="sdg-layers-wrap"' + (cfg().layered ? "" : ' style="display:none !important"') + '>' +
                                 '<div id="sdg-layers">' +
                                     '<div class="sdg-hint">锁住的层下次不重提；环境 / 氛围 / 服装没变化时自动沿用上一楼；↻ 只重摇这一层</div>' +
                                     layerRowsHTML() +
@@ -5669,7 +5689,7 @@
                     presetRowHTML("style", "画风预设",
                         '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风 / 预设 / 锚点规则）">⬆</button>' +
                         '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风、公共块与锚点规则 JSON">⬇</button>' +
-                        '<input type="file" id="sdg-style-file" accept=".json,application/json" style="position:absolute;left:-9999px;width:1px;height:1px">') +
+                        '<input type="file" id="sdg-style-file" accept=".json,application/json" style="position:absolute !important;left:-9999px !important;width:1px !important;height:1px !important">') +
                     field("所属分组", '<select id="sdg-style-group"></select>') +
                     field("挂公共块", '<select id="sdg-style-common"></select>') +
                     bigField("sdg-gen-style", "genStyle", 6, STYLE_DEFAULT, "画风") +
@@ -5739,8 +5759,9 @@
         document.body.appendChild(panel);
 
         const c = cfg();
-        if (c.panelLeft) panel.style.left = c.panelLeft;
-        if (c.panelTop) panel.style.top = c.panelTop;
+        /* 位置写成变量（style.css 里 left / top 取它）：窄屏时固定位置的那条规则要能压过拖出来的位置 */
+        if (c.panelLeft) panel.style.setProperty("--sdg-x", c.panelLeft);
+        if (c.panelTop) panel.style.setProperty("--sdg-y", c.panelTop);
 
         /* 面板拖动 */
         const head = q("#sdg-panel-head");
@@ -5753,14 +5774,14 @@
         });
         head.addEventListener("pointermove", function (ev) {
             if (!dragging) return;
-            panel.style.left = Math.max(0, ox + ev.clientX - sx) + "px";
-            panel.style.top = Math.max(0, oy + ev.clientY - sy) + "px";
+            panel.style.setProperty("--sdg-x", Math.max(0, ox + ev.clientX - sx) + "px");
+            panel.style.setProperty("--sdg-y", Math.max(0, oy + ev.clientY - sy) + "px");
         });
         head.addEventListener("pointerup", function () {
             if (!dragging) return;
             dragging = false;
-            save("panelLeft", panel.style.left);
-            save("panelTop", panel.style.top);
+            save("panelLeft", panel.style.getPropertyValue("--sdg-x"));
+            save("panelTop", panel.style.getPropertyValue("--sdg-y"));
         });
         q("#sdg-panel-close").addEventListener("click", function () { showPanel(false); });
         q("#sdg-theme").addEventListener("click", toggleTheme);
@@ -5800,7 +5821,7 @@
         /* 分层工作区 */
         q("#sdg-layered").addEventListener("change", function (ev) {
             save("layered", ev.target.checked);
-            const box = q("#sdg-layers-wrap"); if (box) box.style.display = ev.target.checked ? "" : "none";
+            setCss(q("#sdg-layers-wrap"), "display", ev.target.checked ? "" : "none");
             const bar = q("#sdg-layered-bar"); if (bar) bar.classList.toggle("sdg-on", !!ev.target.checked);
         });
         const sdgLBar = q("#sdg-layered-bar"); if (sdgLBar) sdgLBar.classList.toggle("sdg-on", !!cfg().layered);
@@ -6010,12 +6031,12 @@
         if (kind === "ext") {
             const vx = isVertexExt();
             const api = q("#sdg-ext-api"); if (api) api.value = vx ? "vertex" : "openai";
-            const bo = q("#sdg-ext-box-openai"); if (bo) bo.style.display = vx ? "none" : "";
-            const bv = q("#sdg-ext-box-vertex"); if (bv) bv.style.display = vx ? "" : "none";
+            setCss(q("#sdg-ext-box-openai"), "display", vx ? "none" : "");
+            setCss(q("#sdg-ext-box-vertex"), "display", vx ? "" : "none");
             const au = q("#sdg-ext-vx-auth"); if (au) au.value = c.extVxAuth === "full" ? "full" : "express";
             const rg = q("#sdg-ext-vx-region"); if (rg) rg.value = c.extVxRegion || "";
             const pj = q("#sdg-ext-vx-project"); if (pj) pj.value = c.extVxProject || "";
-            const pb = q("#sdg-ext-vx-project-box"); if (pb) pb.style.display = c.extVxAuth === "full" ? "none" : "";
+            setCss(q("#sdg-ext-vx-project-box"), "display", c.extVxAuth === "full" ? "none" : "");
         }
         if (kind === "gen") {
             const sz = q("#sdg-grok-size"); if (sz) sz.value = c.grokSize || "1024x1024";
