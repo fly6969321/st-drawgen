@@ -157,25 +157,27 @@ test('image width setting controls the whole slot while the image fills that slo
     assert.equal(f.image().style.maxHeight, 'none');
 });
 
-test('resize updates orphan height caps without capping slot images or shrinking on keyboard open', t => {
+test('贴在楼尾的图也占满整行、不限高；转屏、弹键盘都不会给它加回限高', t => {
     const f = fixture(t, { orphan: true, viewport: { width: 390, height: 844 } });
     const orphan = f.image();
-    const initialCap = orphan.style.maxHeight;
-    f.msg.mes = 'image###portrait###';
-    f.text.textContent = f.msg.mes;
+    assert.ok(orphan.classList.contains('sdg-orphan'));
+    assert.equal(orphan.style.width, '100%', '占满整行，竖图右边不留空');
+    assert.equal(orphan.style.maxWidth, '100%');
+    assert.equal(orphan.style.height, 'auto', '按原比例展开');
+    assert.equal(orphan.style.maxHeight, 'none', '不限高：限高会把竖图等比缩窄');
+    for (const height of [1200, 400]) {
+        f.w.innerHeight = height;
+        f.w.dispatchEvent(new f.w.Event('resize'));
+        assert.equal(orphan.style.width, '100%');
+        assert.equal(orphan.style.maxHeight, 'none');
+    }
+    /* 旧版本留在页面上的图带着内联限高：下一次重绘就改过来，节点不换 */
+    orphan.style.width = 'auto';
+    orphan.style.maxHeight = '591px';
     f.debug.renderFloorImage(0);
-    const slotImage = f.image();
-    f.text.appendChild(orphan); // Keep both display types in the chat for the same resize event.
-    f.w.innerHeight = 1200;
-    f.w.dispatchEvent(new f.w.Event('resize'));
-    assert.equal(orphan.style.maxHeight, '840px', '无工具栏图片保留随视口增大的限高');
-    assert.notEqual(orphan.style.maxHeight, initialCap);
-    assert.equal(slotImage.style.maxHeight, 'none', '转屏不能给槽内图加回限高');
-    f.w.innerHeight = 400;
-    f.w.dispatchEvent(new f.w.Event('resize'));
-    assert.equal(orphan.style.maxHeight, '840px', '键盘缩小视口不会把旧图一起缩小');
-    assert.equal(slotImage.style.width, '100%');
-    assert.equal(slotImage.style.maxHeight, 'none');
+    assert.equal(f.image(), orphan);
+    assert.equal(orphan.style.width, '100%');
+    assert.equal(orphan.style.maxHeight, 'none');
 });
 
 test('paging between portrait and landscape keeps the image node and clears the loading height reserve', t => {

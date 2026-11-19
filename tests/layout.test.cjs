@@ -144,10 +144,24 @@ test('slot images share the toolbar width without a portrait height cap', t => {
         assert.equal(rule.style.getPropertyValue(property), value, property + ' 保证图片按比例占满槽宽且边框不溢出');
         assert.equal(rule.style.getPropertyPriority(property), 'important', property + ' 覆盖旧 DOM 的内联限高及宿主主题');
     }
-    assert.ok(!rule.selectorText.includes('.sdg-orphan'), '不改变无工具栏图片的限高');
 });
 
-test('slot image sizing overrides a host theme while orphan images keep their height cap', t => {
+test('贴在楼尾的图占满整行、不限高，宽度上限留给「图片宽度」设置', t => {
+    const { rules } = sheet(t);
+    const rule = findRule(rules, '#chat .mes .mes_text img.sdg-img.sdg-orphan');
+    assert.ok(rule, '楼尾的图有独立尺寸规则');
+    for (const [property, value] of Object.entries({ width: '100%', height: 'auto', 'max-height': 'none', 'box-sizing': 'border-box' })) {
+        assert.equal(rule.style.getPropertyValue(property), value);
+        assert.equal(rule.style.getPropertyPriority(property), 'important', property + ' 盖掉旧 DOM 的内联限高及宿主主题');
+    }
+    assert.equal(rule.style.getPropertyValue('max-width'), '', '宽度上限不写在这里，听「图片宽度」设置');
+    assert.equal(rule.style.getPropertyValue('display'), '', '不碰 display：关掉「楼层内显示图片」时要能藏起来');
+    const base = findRule(rules, '.sdg-img');
+    assert.equal(base.style.width, '100%');
+    assert.equal(base.style.maxHeight, '', '基础规则也不再限高');
+});
+
+test('槽里的图和楼尾的图都压得过宿主主题的图片规则', t => {
     const hostCss = '<style>#chat .mes .mes_text img { width: auto !important; max-height: 70vh !important; margin: 12px !important; }</style>';
     const dom = new JSDOM('<!doctype html>' + hostCss + '<style>' + css + '</style>' +
         '<div id="chat"><div class="mes"><div class="mes_text">' +
@@ -162,7 +176,12 @@ test('slot image sizing overrides a host theme while orphan images keep their he
     assert.equal(style.maxHeight, 'none', '竖图不再因达到视口限高而比工具栏窄');
     assert.equal(style.boxSizing, 'border-box', '边框计算在总宽度内');
     assert.equal(style.margin, '0px', '主题外边距不会让图片偏移');
-    assert.ok(Math.abs(parseFloat(w.getComputedStyle(w.document.querySelector('.sdg-orphan')).maxHeight) - w.innerHeight * 0.7) < 0.01);
+    const orphan = w.getComputedStyle(w.document.querySelector('.sdg-orphan'));
+    assert.equal(orphan.width, '100%', '楼尾的图占满整行');
+    assert.equal(orphan.height, 'auto');
+    assert.equal(orphan.maxHeight, 'none', '竖图不再被限高缩窄、右边留空');
+    w.document.body.classList.add('sdg-hide-images');
+    assert.equal(w.getComputedStyle(w.document.querySelector('.sdg-orphan')).display, 'none', '关掉「楼层内显示图片」仍然藏得住');
 });
 
 test('version is consistent across manifest, package and source', t => {

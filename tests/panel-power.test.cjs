@@ -91,23 +91,45 @@ test('重新加载后顶栏反映已保存的状态', t => {
     assert.ok(d.querySelector('#sdg-ball-toggle').classList.contains('sdg-ball-off'), '悬浮球隐藏时图标变暗');
 });
 
-test('点悬浮球开面板：紧跟着补发的那一下点击不会勾到面板里的勾选框', t => {
-    const f = fixture(t, { showBall: true, genRetryOnce: false });
-    const d = f.w.document, ball = d.querySelector('#sdg-ball'), panel = d.querySelector('#sdg-panel');
-    const box = d.querySelector('#sdg-gen-retry');
-    const tapBall = () => { ball.dispatchEvent(new f.w.Event('pointerdown', { bubbles: true })); ball.dispatchEvent(new f.w.Event('pointerup', { bubbles: true })); };
-    tapBall();
-    assert.equal(panel.classList.contains('show'), true, '点球打开面板');
-    box.click();                       /* 手机上浏览器补发的 click 落在球底下的勾选框上 */
-    assert.equal(box.checked, false, '这一下被吞掉');
-    assert.equal(f.settings.genRetryOnce, false);
-    box.click();                       /* 之后她自己点，照常生效 */
-    assert.equal(box.checked, true);
-    assert.equal(f.settings.genRetryOnce, true);
-    tapBall();
-    assert.equal(panel.classList.contains('show'), false, '再点球关面板');
-    d.querySelector('#sdg-gen-retry').closest('label').click();
-    assert.equal(box.checked, true, '关面板后补发的点击同样不生效');
+test('点悬浮球：抬手时面板还不动，等这次点按的 click 到了才开 / 关', t => {
+    const f = fixture(t, { showBall: true });
+    const w = f.w, d = w.document, ball = d.querySelector('#sdg-ball'), panel = d.querySelector('#sdg-panel');
+    const fire = type => ball.dispatchEvent(new w.Event(type, { bubbles: true, cancelable: true }));
+    const shown = () => panel.classList.contains('show');
+    fire('pointerdown'); fire('pointerup');
+    assert.equal(shown(), false, '抬手这一刻不开面板：之后补发的 mousedown / mouseup / click 落不到面板里');
+    fire('click');
+    assert.equal(shown(), true, 'click 到了才开');
+    fire('pointerdown'); fire('pointerup');
+    assert.equal(shown(), true, '关也一样等 click');
+    fire('click');
+    assert.equal(shown(), false);
+    fire('click');
+    assert.equal(shown(), false, '没有对应的按下 / 抬起，单独一个 click 不算数');
+});
+
+test('点悬浮球：拖动不开面板；收不到 click 的环境里等一小会儿自己开，且只开一次', t => {
+    const f = fixture(t, { showBall: true });
+    const w = f.w, d = w.document, ball = d.querySelector('#sdg-ball'), panel = d.querySelector('#sdg-panel');
+    const timers = [];
+    w.setTimeout = fn => (timers.push(fn), timers.length);
+    const at = (type, x, y) => { const ev = new w.Event(type, { bubbles: true, cancelable: true }); ev.clientX = x; ev.clientY = y; ball.dispatchEvent(ev); };
+    const shown = () => panel.classList.contains('show');
+    at('pointerdown', 10, 10); at('pointermove', 60, 80); at('pointerup', 60, 80); at('click', 60, 80);
+    assert.equal(shown(), false, '拖动球只挪位置');
+    assert.equal(timers.length, 0);
+    assert.ok(f.settings.ballLeft && f.settings.ballTop, '拖到的位置存下来');
+    at('pointerdown', 60, 80); at('pointerup', 60, 80);
+    assert.equal(shown(), false);
+    assert.equal(timers.length, 1, '排了一个兜底');
+    timers[0]();
+    assert.equal(shown(), true, '一直没等到 click 就自己开');
+    at('click', 60, 80);
+    assert.equal(shown(), true, '迟到的 click 不会再把面板关掉');
+    at('pointerdown', 60, 80); at('pointerup', 60, 80); at('click', 60, 80);
+    assert.equal(shown(), false);
+    timers[1]();
+    assert.equal(shown(), false, 'click 已经处理过，兜底不再重复开关');
 });
 
 test('「失败后自动重试一次」「走酒馆后端代理」在生图页最底部', t => {

@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.27
+ *  生图工坊 · DrawGen v1.8.28
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -130,12 +130,14 @@
  *  · v1.8.27 ①面板 / 大编辑面板 / 悬浮球的样式锁死，不跟酒馆美化走（见 style.css 头注释）。
  *    ②点悬浮球开面板时，不再顺带点到面板里正好在球底下的那个勾选框。
  *    ③「失败后自动重试一次」「走酒馆后端代理」挪到生图页最底部。
+ *  · v1.8.28 ①贴在楼尾的图（正文里建不出槽的那种）也占满整行、不再限高——竖图右边不再空一条。
+ *    ②点悬浮球改成等这次点按结束（click）才开 / 关面板，不会再点进刚弹出来的面板里。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.27";
+    const VERSION = "1.8.28";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -4306,15 +4308,6 @@
     function slotHTML(innerHtml) {
         return '<div class="sdg-slot"><div class="sdg-slot-body"></div><div class="sdg-tag">' + innerHtml + '</div></div>';
     }
-    /* 无工具栏的孤立图限高 = 「键盘未弹出时」视口高的 70%，定格成固定像素。
-       vh/dvh 这类视口单位在手机上会被键盘挤压：点输入框弹出键盘 → 视口变矮 → 限高跟着缩水
-       → 图按比例连宽带窄。固定 px 后键盘不再影响；视口变大（刷新/转屏）只往大更新，不往小缩 */
-    let SDG_CAP_H = 0;
-    function maxImgH() {
-        const h = document.documentElement.clientHeight || window.innerHeight || 0;
-        if (h && Math.round(h * 0.7) > SDG_CAP_H) SDG_CAP_H = Math.round(h * 0.7);
-        return SDG_CAP_H ? SDG_CAP_H + "px" : "70vh";
-    }
     let closeImagePreview = null;
     let imagePreviewEventsBound = false;
     function openImagePreview(src, trigger) {
@@ -4673,13 +4666,14 @@
             img = document.createElement("img");
             img.className = "sdg-img sdg-orphan";
             img.alt = "生成图片";
-            img.style.maxWidth = "100%";
-            img.style.width = "auto";
-            img.style.height = "auto";
-            img.style.maxHeight = maxImgH();
-            img.style.objectFit = "contain";
             el.appendChild(img);
         }
+        /* 和槽里的图一样占满整行、按原比例展开：限高会把竖图等比缩窄，右边空出一条 */
+        img.style.maxWidth = "100%";
+        img.style.width = "100%";
+        img.style.height = "auto";
+        img.style.maxHeight = "none";
+        img.style.objectFit = "contain";
         if (img.getAttribute("src") !== src) img.setAttribute("src", src);
         bindImagePreview(img);
         return true;
@@ -5347,7 +5341,6 @@
     /* ============================================================
        界面：悬浮球
        ============================================================ */
-    let ballTapAt = 0;
     function createBall() {
         let ball = q("#sdg-ball");
         if (ball) return ball;
@@ -5363,8 +5356,16 @@
         applyBallVisible();
 
         let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+        let tapPending = false, tapTimer = 0;
+        /* 这次点按收尾：真正开 / 关面板 */
+        const tapDone = function () {
+            if (tapTimer) { clearTimeout(tapTimer); tapTimer = 0; }
+            if (!tapPending) return;
+            tapPending = false;
+            togglePanel();
+        };
         ball.addEventListener("pointerdown", function (ev) {
-            dragging = true; moved = false;
+            dragging = true; moved = false; tapPending = false;
             sx = ev.clientX; sy = ev.clientY;
             const r = ball.getBoundingClientRect();
             ox = r.left; oy = r.top;
@@ -5380,19 +5381,22 @@
             }
         });
         ball.addEventListener("pointerup", function () {
+            if (!dragging) return;
             dragging = false;
-            if (moved) { save("ballLeft", ball.style.left); save("ballTop", ball.style.top); }
-            else { ballTapAt = Date.now(); togglePanel(); }
+            if (moved) { save("ballLeft", ball.style.left); save("ballTop", ball.style.top); return; }
+            /* 不在抬手这一刻开面板：抬手之后浏览器还要补发 mousedown / mouseup / click，
+               面板这时弹出来正好盖在球上，这几下就全落进面板里（勾选框被勾、输入框弹键盘、
+               下拉框被点开）。等这次点按的最后一个事件 click 到了再开；
+               有的环境不给 click，就等一小会儿自己开。 */
+            tapPending = true;
+            if (tapTimer) clearTimeout(tapTimer);
+            tapTimer = setTimeout(tapDone, 450);
         });
-        /* 点球开面板后，浏览器紧跟着补发的那一下 click 会落到刚弹出来、正好盖在球上的面板里
-           （手机上：球底下是个勾选框就被勾上了）。点球后的一小段时间里，把这一下 click 吞掉。 */
-        window.addEventListener("click", function (ev) {
-            if (!ballTapAt || Date.now() - ballTapAt > 500) return;
-            ballTapAt = 0;
-            if (ev.target === ball) return;
+        ball.addEventListener("pointercancel", function () { dragging = false; tapPending = false; });
+        ball.addEventListener("click", function (ev) {
             ev.preventDefault(); ev.stopPropagation();
-            if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-        }, true);
+            tapDone();
+        });
         return ball;
     }
     function applyBallVisible() {
@@ -6309,16 +6313,6 @@
             if (cfg().showImage === false) document.body.classList.add("sdg-hide-images");
             bindEvents();
             installMesButtonsObserver();
-            /* 视口变大（转屏等）时把限高上限往上抬，已渲染的图同步放大；
-               只增不减——键盘弹出让视口变小不跟缩（点的就是图片不能缩） */
-            window.addEventListener("resize", function () {
-                try {
-                    if (!SDG_CAP_H) return;
-                    const before = SDG_CAP_H;
-                    maxImgH();
-                    if (SDG_CAP_H > before) qa("img.sdg-img.sdg-orphan").forEach(function (im) { im.style.maxHeight = SDG_CAP_H + "px"; });
-                } catch (e) {}
-            }, { passive: true });
             /* 插件一加载就先把旧引用纠正、超限引用摘掉，再绘制——不用等切聊天 */
             setTimeout(function () { healChatRecoveredRefs(); applyKeepCutoff(); renderAllImages(); installMesButtons(); sweepExternalLinks(); }, 800);
             initialized = true;
