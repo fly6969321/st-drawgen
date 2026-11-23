@@ -1,6 +1,6 @@
 {
   "name": "st-drawgen",
-  "version": "1.8.29",
+  "version": "1.8.30",
   "private": true,
   "description": "DrawGen extension regression tests",
   "scripts": {

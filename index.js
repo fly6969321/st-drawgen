@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.29
+ *  生图工坊 · DrawGen v1.8.30（YeeMagine 公益站异步任务适配）
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -134,12 +134,14 @@
  *    ②点悬浮球改成等这次点按结束（click）才开 / 关面板，不会再点进刚弹出来的面板里。
  *  · v1.8.29 ①修复部分浏览器无法打开画风包文件选择器，补充读取状态并允许重复选同一文件。
  *    ②站点新增 images 返回格式 url / b64_json 选项并随站点保存。③隐藏面板原生滚动条，保留滚动。
+ *  · v1.8.30 仅对 demo.yeelo.fun + gpt-image-2.6 启用文档异步参数和任务轮询；
+ *    直接返图、URL / base64、失败状态、超时取消及本地存图均兼容，其它站点请求与解析路径不变。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.29";
+    const VERSION = "1.8.30";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -3825,6 +3827,137 @@
         return "";
     }
 
+    /* YeeMagine 公益站专用：只对文档里的域名 + 模型启用，其它站点的请求体一个字也不加。
+       文档没有给响应示例，因此只在这个专用分支里宽容识别常见 task_id / status / data / result 结构。 */
+    function isYeeMagineAsync(base, model) {
+        if (String(model || "").trim() !== "gpt-image-2.6") return false;
+        try {
+            const u = new URL(String(base || ""));
+            return u.protocol === "https:" && u.hostname.toLowerCase() === "demo.yeelo.fun";
+        } catch (e) { return false; }
+    }
+    function yeeMagineTaskId(result) {
+        const list = [result, result && result.data, result && result.task, result && result.result];
+        for (const item of list) {
+            if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+            const id = item.task_id != null ? item.task_id : (item.taskId != null ? item.taskId : item.id);
+            if ((typeof id === "string" || typeof id === "number") && String(id).trim()) return String(id).trim();
+        }
+        return "";
+    }
+    function yeeMagineTaskStatus(result) {
+        const list = [result, result && result.data, result && result.task, result && result.result, result && result.output];
+        for (const item of list) {
+            if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+            const status = item.status != null ? item.status : (item.state != null ? item.state : (item.task_status != null ? item.task_status : (item.taskStatus != null ? item.taskStatus : item.phase)));
+            if (status != null && String(status).trim()) return String(status).trim().toLowerCase();
+        }
+        return "";
+    }
+    function yeeMagineImage(result) {
+        const standard = imgUrlFromGen(result);
+        if (standard) return standard;
+        const seen = [];
+        function walk(value, depth, parentKey) {
+            if (value == null || depth > 6) return "";
+            const key = String(parentKey || "");
+            if (typeof value === "string") {
+                const text = value.trim();
+                if (!text) return "";
+                if (/^data:image\//i.test(text)) return text;
+                if (/^(?:b64_json|b64|base64|image_base64)$/i.test(key)) return "data:image/png;base64," + text;
+                const canBeImage = /^(?:url|image_url|imageUrl|output_url|outputUrl|image|data|images|output|result|results)$/i.test(key);
+                if (canBeImage && /^https?:\/\//i.test(text) && !/\/images\/tasks\//i.test(text)) return text;
+                return "";
+            }
+            if (typeof value !== "object" || seen.indexOf(value) >= 0) return "";
+            seen.push(value);
+            if (Array.isArray(value)) {
+                for (const item of value) { const found = walk(item, depth + 1, key); if (found) return found; }
+                return "";
+            }
+            for (const k of Object.keys(value)) { const found = walk(value[k], depth + 1, k); if (found) return found; }
+            return "";
+        }
+        return walk(result, 0, "");
+    }
+    function yeeMagineTaskError(result) {
+        const errors = [result && result.error, result && result.data && result.data.error, result && result.result && result.result.error];
+        for (const err of errors) {
+            if (!err) continue;
+            if (typeof err === "string") return err;
+            const msg = err.message || err.msg || err.detail || err.code;
+            if (msg) return String(msg);
+        }
+        const msg = result && (result.message || result.msg || result.detail);
+        return String(msg || ("任务状态：" + (yeeMagineTaskStatus(result) || "未知")));
+    }
+    function yeeMagineSummary(result) {
+        try {
+            return JSON.stringify(result, function (key, value) {
+                if (typeof value === "string" && /^data:image\//i.test(value)) return "[内嵌图片]";
+                if (typeof value === "string" && /b64|base64/i.test(key)) return "[base64 " + value.length + " 字符]";
+                return value;
+            }).slice(0, 1600);
+        } catch (e) { return String(result).slice(0, 300); }
+    }
+    function yeeMagineWait(ms, ctl) {
+        return new Promise(function (resolve, reject) {
+            const signal = ctl.signal;
+            let timer = null;
+            const cleanup = function () { if (signal) try { signal.removeEventListener("abort", onAbort); } catch (e) {} };
+            const onAbort = function () {
+                if (timer) clearTimeout(timer);
+                cleanup();
+                reject(genAbortError(ctl) || new Error("已取消生图"));
+            };
+            timer = setTimeout(function () { cleanup(); resolve(); }, ms);
+            if (signal) {
+                if (signal.aborted) { onAbort(); return; }
+                try { signal.addEventListener("abort", onAbort, { once: true }); } catch (e) {}
+            }
+        });
+    }
+    async function pollYeeMagineTask(base, taskId, apiKey, ctl) {
+        const url = base + "/images/tasks/" + encodeURIComponent(taskId);
+        const headers = { "Accept": "application/json" };
+        if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+        const maxAttempts = Math.max(1, Math.ceil(ctl.timeoutSec / 2));
+        let lastStatus = "";
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const aborted = genAbortError(ctl); if (aborted) throw aborted;
+            const resp = await fetch(url, { method: "GET", headers: headers, signal: ctl.signal });
+            if (!resp.ok) {
+                const text = await resp.text();
+                /* 查询失败不会再次 POST。限流或服务端错误只重查同一个任务。 */
+                if ((resp.status === 429 || resp.status >= 500) && attempt < maxAttempts) {
+                    log("YeeMagine 任务查询暂时失败，稍后重查：", resp.status);
+                    await yeeMagineWait(2000, ctl);
+                    continue;
+                }
+                throw new Error("YeeMagine 任务查询 " + siteErrorBrief(resp.status, text));
+            }
+            const result = await readOpenAIResponse(resp);
+            const image = yeeMagineImage(result);
+            if (image) return image;
+            const status = yeeMagineTaskStatus(result);
+            if (result && result.error || /fail|error|cancel|reject|timeout|expired|abort/.test(status)) {
+                throw new Error("YeeMagine 任务失败：" + yeeMagineTaskError(result));
+            }
+            if (/success|succeed|complete|done|finish/.test(status)) {
+                log("YeeMagine 成功响应但没有图片：", yeeMagineSummary(result));
+                throw new Error("YeeMagine 任务已成功，但响应里没找到图片；原始响应已写入控制台");
+            }
+            if (status !== lastStatus) {
+                lastStatus = status;
+                log("YeeMagine 任务状态：", status || "处理中", "task=" + taskId);
+                setStatus("公益站任务" + (status ? "（" + status + "）" : "") + "正在生图，等待结果…", C_DIM);
+            }
+            if (attempt < maxAttempts) await yeeMagineWait(2000, ctl);
+        }
+        throw new Error("生图任务等待超时（" + ctl.timeoutSec + " 秒），未重复提交生图，以免重复扣费");
+    }
+
     async function genImageUnified(finalPrompt) {
         const c = cfg();
         if (!c.genModel) throw new Error("请先填写生图模型");
@@ -3832,8 +3965,10 @@
         if (!base) throw new Error("请先填写生图 API 地址");
         const channel = String(c.genChannel || "auto");   /* auto | chat | images */
         const retryOnce = !!c.genRetryOnce;               /* 失败重试开关（默认关） */
-        /* images：只走 images 接口（地址直指 images 也算），不再先白打一次 chat */
-        const imagesOnly = channel === "images" || /\/images\/generations$/.test(base);
+        const yeeAsync = isYeeMagineAsync(base, c.genModel);
+        /* images：只走 images 接口（地址直指 images 也算），不再先白打一次 chat。
+           YeeMagine 这个模型文档只有 images 任务接口，因此也只走 images。 */
+        const imagesOnly = channel === "images" || /\/images\/generations$/.test(base) || yeeAsync;
         base = base.replace(/\/(images\/generations|chat\/completions)$/, "");
         const size = normalizeGenSize(c.grokSize);
         const quality = String(c.genQuality || "").trim();       /* GPT 2.5 low~max；Grok low/medium/auto；留空不发送 */
@@ -3935,9 +4070,17 @@
         try {
             const headers = { "Content-Type": "application/json", "Accept": "*/*" };
             if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
-            let responseFormat = c.genResponseFormat === "url" ? "url" : "b64_json";
+            let responseFormat = yeeAsync ? "url" : (c.genResponseFormat === "url" ? "url" : "b64_json");
             const requestBody = function (format) {
-                return JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: format });
+                const body = { model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || (yeeAsync ? "auto" : undefined), response_format: format };
+                if (yeeAsync) {
+                    /* 完全按该站文档示例；这些字段绝不发给其它站点。 */
+                    body.output_format = "png";
+                    body.frame_count = 9;
+                    body.frame_duration_ms = 200;
+                    body.async = true;
+                }
+                return JSON.stringify(body);
             };
             let resp2 = await fetch(base + "/images/generations", {
                 method: "POST", headers: headers, signal: ctl.signal,
@@ -3961,10 +4104,22 @@
             }
             if (resp2.ok) {
                 const result2 = await readOpenAIResponse(resp2);
-                const u2 = imgUrlFromGen(result2);
+                let u2 = imgUrlFromGen(result2);
+                if (!u2 && yeeAsync) u2 = yeeMagineImage(result2);
+                if (!u2 && yeeAsync) {
+                    const taskId = yeeMagineTaskId(result2);
+                    if (taskId) {
+                        log("YeeMagine 已提交异步任务：", taskId);
+                        setStatus("公益站任务已提交，正在等待生图结果…", C_DIM);
+                        /* 已拿到任务号后只 GET 查询，绝不再次 POST 生成。 */
+                        u2 = await pollYeeMagineTask(base, taskId, c.genKey, ctl);
+                    } else {
+                        log("YeeMagine 响应没有图片或 task_id：", yeeMagineSummary(result2));
+                    }
+                }
                 if (u2) { const img2 = await normalizeImageToDataUrl(u2, ctl.signal); ctl.dispose(); return { image: img2, prompt: finalPrompt, via: "generations" }; }
                 ctl.dispose();
-                throw new Error("images 接口响应未包含图片" + (lastErr ? " / " + lastErr : ""));
+                throw new Error("images 接口响应未包含图片" + (yeeAsync ? "，也未找到 task_id：" + yeeMagineSummary(result2).slice(0, 500) : "") + (lastErr ? " / " + lastErr : ""));
             }
             ctl.dispose();
             throw new Error("images 接口 " + siteErrorBrief(resp2.status, why2)

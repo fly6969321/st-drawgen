@@ -39,8 +39,13 @@ function fixture(t, overrides = {}) {
     let respond = () => response({ choices: [{ message: { content: '![](' + SIGNED + ')' } }] });
     w.fetch = async (url, options = {}) => {
         const u = String(url);
-        const generation = /^https:\/\/images\.test\/v1\/(chat\/completions|images\/generations)$/.test(u) || u === '/api/backends/chat-completions/generate';
-        if (generation) { const call = { url: u, body: JSON.parse(options.body), signal: options.signal }; calls.push(call); return respond(call); }
+        const generation = /^https:\/\/(?:images\.test|demo\.yeelo\.fun)\/v1\/(?:chat\/completions|images\/generations)$/.test(u) || u === '/api/backends/chat-completions/generate';
+        const taskQuery = /^https:\/\/demo\.yeelo\.fun\/v1\/images\/tasks\/.+$/.test(u);
+        if (generation || taskQuery) {
+            const call = { url: u, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : undefined, headers: options.headers || {}, signal: options.signal };
+            calls.push(call);
+            return respond(call);
+        }
         if (u === SIGNED) {
             downloads++;
             if (!downloadOk) throw new TypeError('Failed to fetch');   // 跨域被拦就是这个样子
@@ -71,7 +76,7 @@ function fixture(t, overrides = {}) {
         for (let n = 0; n < 200 && !done; n++) {
             for (let i = 0; i < 10; i++) await Promise.resolve();
             await new Promise(resolve => setImmediate(resolve));
-            for (const [id, task] of Array.from(timers)) if (task.ms <= 60 && timers.delete(id)) task.fn();
+            for (const [id, task] of Array.from(timers)) if ((task.ms <= 60 || task.ms === 2000) && timers.delete(id)) task.fn();
         }
         assert.equal(done, true, '异步生图和必要的聊天保存应完成');
         if (error) throw error;
@@ -224,6 +229,75 @@ test('配置 url 被拒且失败重试开着：对称地改要 b64_json，只重
     assert.equal(f.calls.length, 2);
     assert.equal(f.calls[0].body.response_format, 'url');
     assert.equal(f.calls[1].body.response_format, 'b64_json');
+});
+
+test('YeeMagine：按文档提交异步任务，轮询 URL 后沿用本地下载与酒馆存图', async t => {
+    const f = fixture(t, { genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6' });
+    let queries = 0;
+    f.respond(call => {
+        if (call.method === 'POST') return f.response({ task_id: 'job_1', status: 'pending' });
+        queries++;
+        return f.response(queries === 1
+            ? { data: { task_id: 'job_1', status: 'processing' } }
+            : { data: { task_id: 'job_1', status: 'succeeded', result: { images: [{ url: SIGNED }] } } });
+    });
+    assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
+    assert.equal(f.calls.length, 3, '一次 POST + 两次 GET，没有重复提交生图');
+    const post = f.calls[0];
+    assert.equal(post.url, 'https://demo.yeelo.fun/v1/images/generations');
+    assert.equal(post.body.response_format, 'url');
+    assert.equal(post.body.quality, 'auto');
+    assert.equal(post.body.output_format, 'png');
+    assert.equal(post.body.frame_count, 9);
+    assert.equal(post.body.frame_duration_ms, 200);
+    assert.equal(post.body.async, true);
+    assert.equal(f.calls[1].url, 'https://demo.yeelo.fun/v1/images/tasks/job_1');
+    assert.equal(f.calls[1].method, 'GET');
+    assert.equal(f.calls[1].headers.Authorization, 'Bearer test-only');
+    assert.equal(f.downloads(), 1);
+    assert.equal(f.uploads(), 1);
+    assert.equal(f.debug.getImage(f.msg, 0), LOCAL);
+});
+
+test('YeeMagine：兼容 data.taskId 和嵌套 result.data 的 base64 结果', async t => {
+    const f = fixture(t, { genEndpoint: 'https://demo.yeelo.fun/v1/images/generations', genModel: 'gpt-image-2.6' });
+    f.respond(call => call.method === 'POST'
+        ? f.response({ data: { taskId: 'nested/job', status: 'queued' } })
+        : f.response({ status: 'SUCCESS', result: { data: [{ b64_json: BASE64 }] } }));
+    const result = await f.finish(f.debug.genImageUnified('nested'));
+    assert.equal(result.image, DATA);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls[1].url, 'https://demo.yeelo.fun/v1/images/tasks/nested%2Fjob', '任务 ID 必须安全编码');
+    assert.equal(f.downloads(), 0, 'base64 不再下载');
+});
+
+test('YeeMagine：任务失败只终止当前任务，绝不再次 POST', async t => {
+    const f = fixture(t, { genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6', genRetryOnce: true });
+    f.respond(call => call.method === 'POST'
+        ? f.response({ id: 'failed-job', status: 'pending' })
+        : f.response({ id: 'failed-job', status: 'failed', error: { message: 'worker exploded' } }));
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /worker exploded/);
+    assert.equal(f.calls.filter(call => call.method === 'POST').length, 1);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.uploads(), 0);
+});
+
+test('YeeMagine：站点若直接同步返图，仍走原路径，不多发任务查询', async t => {
+    const f = fixture(t, { genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6' });
+    f.respond(() => f.response({ data: [{ b64_json: BASE64 }] }));
+    const result = await f.finish(f.debug.genImageUnified('a cat'));
+    assert.equal(result.image, DATA);
+    assert.equal(f.calls.length, 1);
+});
+
+test('普通生图站：请求体和 task_id 响应处理完全不变，不进入公益站轮询', async t => {
+    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations', genModel: 'test-image' });
+    f.respond(() => f.response({ task_id: 'must-not-poll', status: 'pending' }));
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /响应未包含图片/);
+    assert.equal(f.calls.length, 1);
+    for (const key of ['async', 'output_format', 'frame_count', 'frame_duration_ms']) {
+        assert.equal(Object.hasOwn(f.calls[0].body, key), false, '普通站不增加 ' + key);
+    }
 });
 
 test('失败重试开着：参数错误反复 400 只重试一次；无关 400 不重试', async t => {
