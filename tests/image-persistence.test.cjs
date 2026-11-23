@@ -39,10 +39,12 @@ function fixture(t, overrides = {}) {
     let respond = () => response({ choices: [{ message: { content: '![](' + SIGNED + ')' } }] });
     w.fetch = async (url, options = {}) => {
         const u = String(url);
-        const generation = /^https:\/\/(?:images\.test|demo\.yeelo\.fun)\/v1\/(?:chat\/completions|images\/generations)$/.test(u) || u === '/api/backends/chat-completions/generate';
-        const taskQuery = /^https:\/\/demo\.yeelo\.fun\/v1\/images\/tasks\/.+$/.test(u);
-        if (generation || taskQuery) {
-            const call = { url: u, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : undefined, headers: options.headers || {}, signal: options.signal };
+        const apiUrl = u.startsWith('/proxy/') ? decodeURIComponent(u.slice('/proxy/'.length)) : u;
+        const generation = /^https:\/\/(?:images\.test|demo\.yeelo\.fun)\/v1\/(?:chat\/completions|images\/generations)$/.test(apiUrl) || u === '/api/backends/chat-completions/generate';
+        const taskQuery = /^https:\/\/demo\.yeelo\.fun\/v1\/images\/tasks\/.+$/.test(apiUrl);
+        const modelsQuery = apiUrl === 'https://demo.yeelo.fun/v1/models';
+        if (generation || taskQuery || modelsQuery) {
+            const call = { url: u, apiUrl, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : undefined, headers: options.headers || {}, signal: options.signal, credentials: options.credentials };
             calls.push(call);
             return respond(call);
         }
@@ -288,6 +290,127 @@ test('YeeMagine：站点若直接同步返图，仍走原路径，不多发任�
     const result = await f.finish(f.debug.genImageUnified('a cat'));
     assert.equal(result.image, DATA);
     assert.equal(f.calls.length, 1);
+});
+
+test('YeeMagine：代理同时覆盖任务提交和轮询，根地址与完整接口地址只拼一次路径', async t => {
+    for (const genEndpoint of [
+        'https://demo.yeelo.fun/',
+        'https://demo.yeelo.fun/v1',
+        'https://demo.yeelo.fun/v1/images/generations/',
+    ]) {
+        const f = fixture(t, { genEndpoint, genModel: 'gpt-image-2.6', genProxy: true });
+        f.ctx.getRequestHeaders = () => ({
+            'Content-Type': 'application/json', 'x-csrf-token': 'local-csrf',
+            Authorization: 'Bearer local-tavern-secret', Cookie: 'local-tavern-cookie',
+        });
+        let queries = 0;
+        f.respond(call => {
+            if (call.method === 'POST') return f.response({ task_id: 'proxy/job', status: 'pending' });
+            return f.response(++queries === 1
+                ? { task_id: 'proxy/job', status: 'processing' }
+                : { status: 'succeeded', data: [{ b64_json: BASE64 }] });
+        });
+        assert.equal((await f.finish(f.debug.genImageUnified('a cat'))).image, DATA);
+        assert.deepEqual(f.calls.map(call => [call.method, call.url]), [
+            ['POST', '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/images/generations')],
+            ['GET', '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/images/tasks/proxy%2Fjob')],
+            ['GET', '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/images/tasks/proxy%2Fjob')],
+        ], genEndpoint + '：只提交一次，查询相同任务，不直连或改走 chat');
+        for (const call of f.calls) {
+            const headers = Object.fromEntries(Object.entries(call.headers).map(([key, value]) => [key.toLowerCase(), value]));
+            assert.equal(headers.authorization, 'Bearer test-only', 'API Key 必须保留，不使用酒馆本地 Authorization');
+            assert.equal(headers['x-csrf-token'], 'local-csrf', '同源代理需要酒馆 CSRF');
+            assert.equal(headers.cookie, undefined, '不把本地 Cookie 放进转发头');
+            assert.equal(call.credentials, 'same-origin');
+            assert.ok(call.signal, '提交和查询都携带停止信号');
+            assert.equal(call.signal, f.calls[0].signal, '整个任务共用同一个停止信号');
+        }
+        assert.equal(f.calls[0].headers['Content-Type'], 'application/json');
+        assert.equal(f.calls[0].body.async, true);
+        assert.equal(f.downloads(), 0);
+    }
+});
+
+test('YeeMagine：代理查询期间点停止会取消同一个任务，不再轮询或重复提交', async t => {
+    const f = fixture(t, { genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6', genProxy: true });
+    f.respond(call => {
+        if (call.method === 'POST') return f.response({ task_id: 'stop-job', status: 'pending' });
+        f.debug.onStop();
+        return f.response({ task_id: 'stop-job', status: 'processing' });
+    });
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /已取消/);
+    assert.deepEqual(f.calls.map(call => call.method), ['POST', 'GET']);
+    assert.ok(f.calls.every(call => call.url.startsWith('/proxy/')));
+    assert.equal(f.calls[0].signal, f.calls[1].signal);
+    assert.equal(f.calls[0].signal.aborted, true);
+});
+
+test('YeeMagine：代理 POST 网络中断即使开启失败重试也不补发，以免重复扣费', async t => {
+    const f = fixture(t, {
+        genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6',
+        genProxy: true, genRetryOnce: true,
+    });
+    f.respond(() => { throw new TypeError('Failed to fetch'); });
+    await assert.rejects(f.finish(f.debug.genImageUnified('a cat')), /Failed to fetch/);
+    assert.equal(f.calls.length, 1, '只发一次 POST，不改走直连或 chat');
+    assert.equal(f.calls[0].url, '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/images/generations'));
+    assert.equal(f.calls[0].method, 'POST');
+    assert.equal(f.uploads(), 0);
+});
+
+test('YeeMagine：拉取模型和连接检查也走选定代理，未选模型时能先拉列表', async t => {
+    for (const genEndpoint of ['https://demo.yeelo.fun', 'https://demo.yeelo.fun/v1/images/generations']) {
+        const f = fixture(t, { genEndpoint, genModel: '', genProxy: true });
+        f.ctx.getRequestHeaders = () => ({ 'X-CSRF-Token': 'model-csrf', Authorization: 'Bearer local-tavern-secret' });
+        f.respond(() => f.response({ data: [{ id: 'gpt-image-2.6' }] }));
+        await f.debug.fetchModels('gen');
+        assert.equal(f.settings.genModel, 'gpt-image-2.6', '没有预先选模型也能代理拉取并选中');
+        assert.deepEqual(clone(f.debug.activeProfile('gen').models), ['gpt-image-2.6']);
+        await f.debug.testGenConnection();
+        assert.equal(f.calls.length, 2, '拉取与连接检查各查询一次，不真生图');
+        for (const call of f.calls) {
+            assert.equal(call.method, 'GET');
+            assert.equal(call.url, '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/models'));
+            assert.equal(call.headers.Authorization, 'Bearer test-only');
+            assert.equal(call.headers['X-CSRF-Token'], 'model-csrf');
+            assert.equal(call.credentials, 'same-origin');
+        }
+    }
+});
+
+test('YeeMagine：连接检查区分模型列表不存在、代理未启用与鉴权失败，均不提交生图', async t => {
+    const cases = [
+        {
+            name: '上游没有 models 接口', status: 404, body: { error: { message: 'Not Found' } },
+            expected: /站点可达.*未提供模型列表.*手填模型/,
+        },
+        {
+            name: '酒馆跨域代理未启用', status: 404,
+            body: 'CORS proxy is disabled. Use --corsProxy or enableCorsProxy in config.yaml.',
+            expected: /生图连接失败.*404.*enableCorsProxy/,
+        },
+        {
+            name: '上游 API Key 无效', status: 401, body: { error: { message: 'Invalid API key' } },
+            expected: /生图连接失败.*401.*Invalid API key/,
+        },
+    ];
+    for (const item of cases) {
+        const f = fixture(t, { genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6', genProxy: true });
+        f.respond(() => f.response(item.body, item.status));
+        await f.debug.testGenConnection();
+        const status = f.w.document.querySelector('#sdg-status').textContent;
+        assert.match(status, item.expected, item.name);
+        if (item.status === 404 && item.name === '上游没有 models 接口') {
+            assert.match(status, /未生成图片/, '模型列表 404 不能判定生图接口不可用');
+        } else {
+            assert.doesNotMatch(status, /站点可达/, '代理或鉴权失败不能按缺少模型列表放行');
+        }
+        assert.equal(f.calls.length, 1, item.name + '：仅发一个模型 GET');
+        assert.equal(f.calls[0].url, '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/models'));
+        assert.equal(f.calls[0].method, 'GET');
+        assert.equal(f.calls[0].body, undefined, '连接检查不发送生成请求体');
+        assert.equal(f.uploads(), 0);
+    }
 });
 
 test('普通生图站：请求体和 task_id 响应处理完全不变，不进入公益站轮询', async t => {

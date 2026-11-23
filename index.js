@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.30（YeeMagine 公益站异步任务适配）
+ *  生图工坊 · DrawGen v1.8.31（YeeMagine 异步任务跨域代理修复）
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -136,12 +136,13 @@
  *    ②站点新增 images 返回格式 url / b64_json 选项并随站点保存。③隐藏面板原生滚动条，保留滚动。
  *  · v1.8.30 仅对 demo.yeelo.fun + gpt-image-2.6 启用文档异步参数和任务轮询；
  *    直接返图、URL / base64、失败状态、超时取消及本地存图均兼容，其它站点请求与解析路径不变。
+ *  · v1.8.31 公益站提交、轮询与模型拉取支持酒馆跨域代理；统一补齐 /v1 地址。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.30";
+    const VERSION = "1.8.31";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -3829,12 +3830,34 @@
 
     /* YeeMagine 公益站专用：只对文档里的域名 + 模型启用，其它站点的请求体一个字也不加。
        文档没有给响应示例，因此只在这个专用分支里宽容识别常见 task_id / status / data / result 结构。 */
-    function isYeeMagineAsync(base, model) {
-        if (String(model || "").trim() !== "gpt-image-2.6") return false;
+    function isYeeMagineSite(base) {
         try {
             const u = new URL(String(base || ""));
             return u.protocol === "https:" && u.hostname.toLowerCase() === "demo.yeelo.fun";
         } catch (e) { return false; }
+    }
+    function isYeeMagineAsync(base, model) {
+        return String(model || "").trim() === "gpt-image-2.6" && isYeeMagineSite(base);
+    }
+    function yeeMagineApiBase(base) {
+        return normalizeApiBase(String(base || "").trim().replace(/\/+$/, "").replace(/\/images\/generations$/, ""));
+    }
+    function fetchYeeMagineApi(url, options, timeoutMs) {
+        const request = Object.assign({}, options || {});
+        if (cfg().genProxy) {
+            const context = ctx();
+            if (!context || typeof context.getRequestHeaders !== "function") throw new Error("无法读取酒馆代理请求上下文");
+            request.headers = Object.assign({}, request.headers || {});
+            const local = context.getRequestHeaders() || {};
+            /* API Key 只给当前公益站；酒馆登录凭据只用于同源请求，不能混进站点鉴权。 */
+            Object.keys(local).forEach(function (key) {
+                if (key.toLowerCase() === "x-csrf-token") request.headers[key] = local[key];
+            });
+            request.credentials = "same-origin";
+            url = "/proxy/" + encodeURIComponent(url);
+        }
+        /* 提交前选择直连或代理，网络失败后绝不切换通道重发 POST。 */
+        return fetchWithTimeout(url, request, timeoutMs || 0);
     }
     function yeeMagineTaskId(result) {
         const list = [result, result && result.data, result && result.task, result && result.result];
@@ -3926,7 +3949,7 @@
         let lastStatus = "";
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             const aborted = genAbortError(ctl); if (aborted) throw aborted;
-            const resp = await fetch(url, { method: "GET", headers: headers, signal: ctl.signal });
+            const resp = await fetchYeeMagineApi(url, { method: "GET", headers: headers, signal: ctl.signal });
             if (!resp.ok) {
                 const text = await resp.text();
                 /* 查询失败不会再次 POST。限流或服务端错误只重查同一个任务。 */
@@ -3970,6 +3993,7 @@
            YeeMagine 这个模型文档只有 images 任务接口，因此也只走 images。 */
         const imagesOnly = channel === "images" || /\/images\/generations$/.test(base) || yeeAsync;
         base = base.replace(/\/(images\/generations|chat\/completions)$/, "");
+        if (yeeAsync) base = yeeMagineApiBase(base);
         const size = normalizeGenSize(c.grokSize);
         const quality = String(c.genQuality || "").trim();       /* GPT 2.5 low~max；Grok low/medium/auto；留空不发送 */
         log("生图请求：", base.replace(/^https?:\/\//, ""), "model=" + c.genModel, "size=" + size, "q=" + (quality || "-"));
@@ -4082,7 +4106,8 @@
                 }
                 return JSON.stringify(body);
             };
-            let resp2 = await fetch(base + "/images/generations", {
+            const sendImages = yeeAsync ? fetchYeeMagineApi : fetch;
+            let resp2 = await sendImages(base + "/images/generations", {
                 method: "POST", headers: headers, signal: ctl.signal,
                 body: requestBody(responseFormat)
             });
@@ -4096,7 +4121,7 @@
                 retryLeft--;
                 responseFormat = responseFormat === "url" ? "b64_json" : "url";
                 log("站点不接受当前 response_format，改用 " + responseFormat + " 重试");
-                resp2 = await fetch(base + "/images/generations", {
+                resp2 = await sendImages(base + "/images/generations", {
                     method: "POST", headers: headers, signal: ctl.signal,
                     body: requestBody(responseFormat)
                 });
@@ -6282,10 +6307,12 @@
         if (!endpoint) { setStatus("请先填写 API 地址", C_ERR); return; }
         setStatus("正在拉取模型…", C_OK);
         try {
-            const url = normalizeApiBase(endpoint) + "/models";
+            const yeeSite = kind === "gen" && isYeeMagineSite(endpoint);
+            const url = (yeeSite ? yeeMagineApiBase(endpoint) : normalizeApiBase(endpoint)) + "/models";
             const headers = {};
             if (key) headers["Authorization"] = "Bearer " + key;
-            const res = await fetchWithTimeout(url, { method: "GET", headers }, Number(c.requestTimeout || 0) * 1000);
+            const sendModels = yeeSite ? fetchYeeMagineApi : fetchWithTimeout;
+            const res = await sendModels(url, { method: "GET", headers }, Number(c.requestTimeout || 0) * 1000);
             const raw = await res.text();
             if (!res.ok) throw new Error("HTTP " + res.status + "：" + raw.slice(0, 180));
             const data = safeJson(raw, null);
@@ -6356,18 +6383,28 @@
         try {
             if (!c.genEndpoint) throw new Error("请先填写生图 API 地址");
             if (!c.genModel) throw new Error("请先填写生图模型");
-            if (c.genProxy) {
+            const yeeSite = isYeeMagineSite(c.genEndpoint);
+            if (c.genProxy && !yeeSite) {
                 /* 走酒馆后端代理时浏览器这边本来就没法直连，不真生图、只回报配置已填 */
                 setStatus("站点配置已填写（走酒馆后端代理，未真实生图；要验证连通请生成一张）", C_OK);
                 return;
             }
             setStatus("正在检查生图站点连通性（不会生成图片，不扣费）…", C_OK);
-            const base = String(c.genEndpoint || "").trim().replace(/\/+$/, "").replace(/\/(images\/generations|chat\/completions)$/, "");
+            const base = yeeSite ? yeeMagineApiBase(c.genEndpoint) : String(c.genEndpoint || "").trim().replace(/\/+$/, "").replace(/\/(images\/generations|chat\/completions)$/, "");
             const headers = { "Accept": "*/*" };
             if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
-            /* 只要能拿到 HTTP 应答（哪怕是 401/404）就说明地址和网络通；
-               只有连不上（网络层错误）才报失败。不发任何生图请求。 */
-            await fetchWithTimeout(base + "/models", { headers: headers }, 30000);
+            /* 普通站只检查能否拿到 HTTP 应答；公益站同时报告代理/鉴权错误。
+               这里只 GET 模型，不发任何生图请求。 */
+            const checkConnection = yeeSite ? fetchYeeMagineApi : fetchWithTimeout;
+            const res = await checkConnection(base + "/models", { headers: headers }, 30000);
+            if (yeeSite && !res.ok) {
+                const raw = await res.text();
+                if (res.status === 404 && !/CORS proxy|enableCorsProxy|--corsProxy/i.test(raw)) {
+                    setStatus("站点可达，但未提供模型列表；请手填模型（未生成图片）", C_WARN);
+                    return;
+                }
+                throw new Error(siteErrorBrief(res.status, raw));
+            }
             setStatus("连接成功 ✓（站点可达；未生成图片，不扣费）", C_OK);
         } catch (e) {
             setStatus("生图连接失败：" + (e && e.message || e), C_ERR);
