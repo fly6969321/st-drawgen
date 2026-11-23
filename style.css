@@ -1,4 +1,4 @@
-/* 生图工坊 · DrawGen v1.8.28 */
+/* 生图工坊 · DrawGen v1.8.29 */
 
 /* ============================================================
    面板 / 大编辑面板 / 悬浮球：样式锁死，不跟酒馆美化走
@@ -76,7 +76,20 @@
 :where(#sdg-panel, #sdg-editor) svg path:nth-child(2) { d: path("M15 4h5v5") !important; }
 :where(#sdg-panel, #sdg-editor) svg path:nth-child(3) { d: path("M9 20H4v-5") !important; }
 :where(#sdg-panel, #sdg-editor) svg path:nth-child(4) { d: path("M15 20h5v-5") !important; }
-:where(#sdg-panel, #sdg-editor) input[type="file"] { display: none !important; }
+/* 文件框保持可渲染，display:none 会让部分 WebView / 移动浏览器忽略 click / showPicker。 */
+:where(#sdg-panel, #sdg-editor) input[type="file"] {
+    display: block !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 1px !important;
+    height: 1px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
 :where(#sdg-panel, #sdg-editor) input[type="checkbox"] {
     outline: 1px solid rgba(125, 125, 125, 0.2) !important;
     overflow: hidden !important;
@@ -86,17 +99,15 @@
 :where(#sdg-panel, #sdg-editor) :where(input, textarea):disabled { cursor: not-allowed !important; filter: brightness(0.5) !important; }
 :where(#sdg-panel, #sdg-editor, #sdg-ball)::selection, :where(#sdg-panel, #sdg-editor) ::selection { background-color: #8ab4f8 !important; color: #0f1a2e !important; text-shadow: none !important; }
 :where(#sdg-panel, #sdg-editor, #sdg-ball)[data-theme="day"]::selection, :where(#sdg-panel, #sdg-editor)[data-theme="day"] ::selection { background-color: #3b6fd9 !important; color: #ffffff !important; }
-:where(#sdg-panel, #sdg-editor)::-webkit-scrollbar, :where(#sdg-panel, #sdg-editor) ::-webkit-scrollbar { width: 11.2px !important; height: 11.2px !important; }
-:where(#sdg-panel, #sdg-editor)::-webkit-scrollbar-track, :where(#sdg-panel, #sdg-editor) ::-webkit-scrollbar-track { background: transparent !important; }
-:where(#sdg-panel, #sdg-editor)::-webkit-scrollbar-corner, :where(#sdg-panel, #sdg-editor) ::-webkit-scrollbar-corner { background: transparent !important; }
-:where(#sdg-panel, #sdg-editor)::-webkit-scrollbar-thumb, :where(#sdg-panel, #sdg-editor) ::-webkit-scrollbar-thumb {
-    background-color: rgba(175, 175, 175, 0.7) !important;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.5) !important;
-    border-radius: 10px !important;
-    background-clip: content-box !important;
-    border: 2px solid transparent !important;
-    min-height: 40px !important;
-    min-width: 40px !important;
+/* 只隐藏原生滚动条外观，滚动容器本身仍可滚轮 / 触摸滚动。 */
+:where(#sdg-panel, #sdg-editor), :where(#sdg-panel, #sdg-editor) * {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+}
+:where(#sdg-panel, #sdg-editor)::-webkit-scrollbar, :where(#sdg-panel, #sdg-editor) *::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
 }
 }
 

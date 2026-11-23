@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.28
+ *  生图工坊 · DrawGen v1.8.29
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -132,12 +132,14 @@
  *    ③「失败后自动重试一次」「走酒馆后端代理」挪到生图页最底部。
  *  · v1.8.28 ①贴在楼尾的图（正文里建不出槽的那种）也占满整行、不再限高——竖图右边不再空一条。
  *    ②点悬浮球改成等这次点按结束（click）才开 / 关面板，不会再点进刚弹出来的面板里。
+ *  · v1.8.29 ①修复部分浏览器无法打开画风包文件选择器，补充读取状态并允许重复选同一文件。
+ *    ②站点新增 images 返回格式 url / b64_json 选项并随站点保存。③隐藏面板原生滚动条，保留滚动。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.28";
+    const VERSION = "1.8.29";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -209,7 +211,8 @@
         grokSize: "1024x1024",
         genQuality: "",            // 画质参数：GPT 2.5 系 low/medium/high/xhigh/max；Grok low/medium/auto；留空不发送（随站点档案保存）
         genChannel: "auto",        // 生图通道：auto=先 chat 失败退 images | chat=只用 chat/completions | images=只用 images/generations（随站点档案保存）
-        genRetryOnce: false,       // 失败重试：默认关 = 每次只发一次生图请求；打开后失败最多自动重试一次（换通道兜底 / b64→url 共享同一次）
+        genResponseFormat: "b64_json", // images/generations 返回格式：b64_json=图片数据 | url=图片链接（随站点档案保存）
+        genRetryOnce: false,       // 失败重试：默认关 = 每次只发一次生图请求；打开后失败最多自动重试一次（换通道 / 换返回格式共享同一次）
         genProxy: false,
         genTimeout: 300,
         imageKeepCount: 200,       // 只保留最新的 N 张本地图片（服务器文件 + 聊天引用），超出的旧图删掉；0 = 不清理
@@ -1528,7 +1531,7 @@
        ============================================================ */
     const PROF_FIELDS = {
         ext: { endpoint: "extEndpoint", key: "extKey", model: "extModel", api: "extApi", vxAuth: "extVxAuth", vxRegion: "extVxRegion", vxProject: "extVxProject", vxModel: "extVxModel" },
-        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize", quality: "genQuality", channel: "genChannel" }
+        gen: { endpoint: "genEndpoint", key: "genKey", model: "genModel", size: "grokSize", quality: "genQuality", channel: "genChannel", responseFormat: "genResponseFormat" }
     };
     /* 提取站点选了「Vertex 直连」时，模型名和模型列表各存一份（vxModel / vxModels），
        和 OpenAI 兼容那份互不覆盖 —— 接口来回切，两边填过的都还在。 */
@@ -1675,7 +1678,7 @@
         const name = window.prompt("新站点名字", "站点" + (list.length + 1));
         if (name === null) return;
         const p = { id: newId(), name: String(name).trim() || "站点" + (list.length + 1), endpoint: "", key: "", model: "", models: [] };
-        if (kind === "gen") { p.size = cfg().grokSize || "1024x1024"; p.quality = cfg().genQuality || ""; p.channel = cfg().genChannel || "auto"; }
+        if (kind === "gen") { p.size = cfg().grokSize || "1024x1024"; p.quality = cfg().genQuality || ""; p.channel = cfg().genChannel || "auto"; p.responseFormat = cfg().genResponseFormat === "url" ? "url" : "b64_json"; }
         list.push(p);
         saveProfiles(kind, list);
         saveCritical(profIdKey(kind), p.id);
@@ -2157,16 +2160,30 @@
         const btnExp = q("#sdg-style-export"); if (btnExp) btnExp.addEventListener("click", styleExportFile);
         const btnImp = q("#sdg-style-import"); if (btnImp) btnImp.addEventListener("click", stylePickAndImport);
         const fileInp = q("#sdg-style-file");
-        if (fileInp) fileInp.addEventListener("change", function (e) {
-            const f = e.target.files && e.target.files[0];
-            if (f) {
-                const reader = new FileReader();
-                reader.onload = function () { try { packImportText(String(reader.result || "")); } catch (err) { setStatus("导入失败：" + (err && err.message || err), C_ERR); } };
-                reader.onerror = function () { setStatus("读文件失败，再试一次", C_ERR); };
-                reader.readAsText(f, "utf-8");
-            }
-            try { e.target.value = ""; } catch (ev) {}
-        });
+        const clearStyleFile = function () { try { if (fileInp) fileInp.value = ""; } catch (e) {} };
+        if (fileInp) {
+            fileInp.addEventListener("cancel", function () { clearStyleFile(); setStatus("已取消选择文件", C_DIM); });
+            fileInp.addEventListener("change", function () {
+                const f = fileInp.files && fileInp.files[0];
+                /* File 对象已经拿到，立刻清空 input：下次选同一个文件也仍会触发 change。 */
+                clearStyleFile();
+                if (!f) { setStatus("没有读到文件，请再选一次", C_WARN); return; }
+                setStatus("正在读取：" + (f.name || "JSON 文件") + "…", C_DIM);
+                try {
+                    const reader = new FileReader();
+                    reader.onload = function () {
+                        try { packImportText(String(reader.result || "")); }
+                        catch (err) { setStatus("导入失败：" + (err && err.message || err), C_ERR); }
+                        finally { clearStyleFile(); }
+                    };
+                    reader.onerror = function () { clearStyleFile(); setStatus("读文件失败，再试一次", C_ERR); };
+                    reader.readAsText(f, "utf-8");
+                } catch (err) {
+                    clearStyleFile();
+                    setStatus("读文件失败：" + (err && err.message || err), C_ERR);
+                }
+            });
+        }
     }
 
     /* ============================================================
@@ -2213,7 +2230,21 @@
             setStatus("导出失败：" + (e && e.message || e), C_ERR);
         }
     }
-    function stylePickAndImport() { const el = q("#sdg-style-file"); if (el) el.click(); }
+    function stylePickAndImport() {
+        const el = q("#sdg-style-file");
+        if (!el) { setStatus("文件选择器还没准备好，请重新打开面板再试", C_ERR); return; }
+        /* 不能 display:none：部分 WebView / 移动浏览器会因此忽略程序化点击。
+           先清掉旧值，再在本次用户点按里直接打开原生选择器。 */
+        try { el.value = ""; } catch (e) {}
+        setStatus("请选择要导入的 JSON 文件", C_DIM);
+        try {
+            if (typeof el.showPicker === "function") el.showPicker();
+            else el.click();
+        } catch (e) {
+            try { el.click(); }
+            catch (err) { setStatus("无法打开文件选择器：" + (err && err.message || e && e.message || err || e), C_ERR); }
+        }
+    }
 
     /* tpl = true：value 就是整张模板（本插件 1.8.25 起导出的画风包）；否则按旧格式认（前缀 / 后缀，或只有一段风格词） */
     function styleItemFromRaw(raw, tpl) {
@@ -3904,22 +3935,27 @@
         try {
             const headers = { "Content-Type": "application/json", "Accept": "*/*" };
             if (c.genKey) headers["Authorization"] = "Bearer " + c.genKey;
+            let responseFormat = c.genResponseFormat === "url" ? "url" : "b64_json";
+            const requestBody = function (format) {
+                return JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: format });
+            };
             let resp2 = await fetch(base + "/images/generations", {
                 method: "POST", headers: headers, signal: ctl.signal,
-                body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "b64_json" })
+                body: requestBody(responseFormat)
             });
             let why2 = "";
             if (!resp2.ok) why2 = await resp2.text();
-            /* 先要图片数据：拿到数据就能直接上传存本地，不用下载、不受跨域影响。
-               站点明确 400 拒绝这个参数（肯定没计费）、「失败重试」开着且还有预算，
-               才改要 url 重试；200 后绝不补发。 */
-            const b64Rejected = resp2.status === 400 && /response_format/i.test(why2);
-            if (b64Rejected && retryLeft > 0) {
+            /* 默认先要图片数据：拿到数据就能直接上传存本地，不用下载、不受跨域影响；
+               站点只收 url 时可在站点配置里直接选。明确 400 拒绝格式且「失败重试」开着，
+               才换另一种格式重试；200 后绝不补发。 */
+            const responseFormatRejected = resp2.status === 400 && /response_format/i.test(why2);
+            if (responseFormatRejected && retryLeft > 0) {
                 retryLeft--;
-                log("站点不接受 b64_json，改用 url 重试");
+                responseFormat = responseFormat === "url" ? "b64_json" : "url";
+                log("站点不接受当前 response_format，改用 " + responseFormat + " 重试");
                 resp2 = await fetch(base + "/images/generations", {
                     method: "POST", headers: headers, signal: ctl.signal,
-                    body: JSON.stringify({ model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || undefined, response_format: "url" })
+                    body: requestBody(responseFormat)
                 });
                 why2 = resp2.ok ? "" : await resp2.text();   /* body 只能读一次，重试后立刻读走 */
             }
@@ -3932,7 +3968,7 @@
             }
             ctl.dispose();
             throw new Error("images 接口 " + siteErrorBrief(resp2.status, why2)
-                + (b64Rejected && !retryOnce ? "（未自动改发重试；可在设置打开「失败重试」）" : "")
+                + (responseFormatRejected && !retryOnce ? "（未自动改发重试；可在站点配置切换返回格式，或打开「失败重试」）" : "")
                 + (lastErr ? " / " + lastErr : ""));
         } catch (e) {
             ctl.dispose();
@@ -5645,6 +5681,10 @@
                         '<option value="chat"' + (genCh === "chat" ? " selected" : "") + '>只用 chat/completions</option>' +
                         '<option value="images"' + (genCh === "images" ? " selected" : "") + '>只用 images/generations</option>' +
                     '</select>') +
+                    field("返回格式 response_format", '<select id="sdg-gen-response-format">' +
+                        '<option value="b64_json"' + (cfg().genResponseFormat !== "url" ? " selected" : "") + '>b64_json（图片数据）</option>' +
+                        '<option value="url"' + (cfg().genResponseFormat === "url" ? " selected" : "") + '>url（图片链接）</option>' +
+                    '</select><div class="sdg-hint">用于 images/generations；站点只支持 url 时请选择 url，随站点档案保存</div>') +
 
                     '<h5>自动化</h5>' +
                     chk("sdg-auto-extract", "autoExtract", "收到回复后自动提取") +
@@ -5693,7 +5733,7 @@
                     presetRowHTML("style", "画风预设",
                         '<button type="button" id="sdg-style-import" class="sdg-minibtn" title="导入 JSON（画风 / 预设 / 锚点规则）">⬆</button>' +
                         '<button type="button" id="sdg-style-export" class="sdg-minibtn" title="导出画风、公共块与锚点规则 JSON">⬇</button>' +
-                        '<input type="file" id="sdg-style-file" accept=".json,application/json" style="position:absolute !important;left:-9999px !important;width:1px !important;height:1px !important">') +
+                        '<input type="file" id="sdg-style-file" accept=".json,application/json">') +
                     field("所属分组", '<select id="sdg-style-group"></select>') +
                     field("挂公共块", '<select id="sdg-style-common"></select>') +
                     bigField("sdg-gen-style", "genStyle", 6, STYLE_DEFAULT, "画风") +
@@ -5974,6 +6014,11 @@
             on("#sdg-grok-size", "change", function (e) { saveProfileField("gen", "size", e.target.value); });
             on("#sdg-gen-quality", "change", function (e) { saveProfileField("gen", "quality", e.target.value); });
             on("#sdg-gen-channel", "change", function (e) { saveProfileField("gen", "channel", e.target.value); setStatus("生成通道已改为：" + e.target.value, C_OK); });
+            on("#sdg-gen-response-format", "change", function (e) {
+                const v = e.target.value === "url" ? "url" : "b64_json";
+                saveProfileField("gen", "responseFormat", v);
+                setStatus("images 返回格式已改为：" + v, C_OK);
+            });
         }
 
         if (kind === "ext") {
@@ -6046,6 +6091,7 @@
             const sz = q("#sdg-grok-size"); if (sz) sz.value = c.grokSize || "1024x1024";
             const ql = q("#sdg-gen-quality"); if (ql) ql.value = c.genQuality || "";
             const chn = q("#sdg-gen-channel"); if (chn) chn.value = c.genChannel || "auto";
+            const rf = q("#sdg-gen-response-format"); if (rf) rf.value = c.genResponseFormat === "url" ? "url" : "b64_json";
         }
         renderModelSelect(kind);
     }

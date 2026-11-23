@@ -184,6 +184,26 @@ test('槽里的图和楼尾的图都压得过宿主主题的图片规则', t => 
     assert.equal(w.getComputedStyle(w.document.querySelector('.sdg-orphan')).display, 'none', '关掉「楼层内显示图片」仍然藏得住');
 });
 
+test('文件选择框保持可渲染，面板隐藏滚动条但保留滚动容器', t => {
+    const { rules } = sheet(t);
+    const picker = findRule(rules, ':where(#sdg-panel, #sdg-editor) input[type="file"]');
+    assert.ok(picker, '文件选择框规则存在');
+    assert.equal(picker.style.display, 'block', '不能 display:none，否则部分浏览器打不开选择器');
+    assert.equal(picker.style.position, 'fixed');
+    assert.equal(picker.style.opacity, '0', '只视觉隐藏，不影响程序化打开');
+
+    const scroll = findRule(rules, ':where(#sdg-panel, #sdg-editor), :where(#sdg-panel, #sdg-editor) *');
+    assert.ok(scroll, 'Firefox / IE 滚动条隐藏规则存在');
+    assert.equal(scroll.style.getPropertyValue('scrollbar-width'), 'none');
+    const webkit = flat(rules).map(x => x.rule).find(r =>
+        (r.selectorText || '').includes(':where(#sdg-panel, #sdg-editor)') &&
+        (r.selectorText || '').includes('::-webkit-scrollbar') && r.style.display === 'none');
+    assert.ok(webkit, 'WebKit 滚动条隐藏规则存在');
+    assert.equal(webkit.style.width, '0px');
+    assert.equal(webkit.style.height, '0px');
+    assert.equal(findRule(rules, '#sdg-panel-body').style.overflowY, 'auto', '隐藏外观不等于禁止滚动');
+});
+
 test('version is consistent across manifest, package and source', t => {
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
     const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));

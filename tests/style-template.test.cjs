@@ -235,3 +235,25 @@ test('一次导入几百个画风：编号一个不撞；旧数据里撞号的�
     assert.equal(healed[4].id, l2[4].id, '先出现的那个编号不变');
     assert.deepEqual(healed.map(p => p.value), l2.map(p => p.value), '内容一个字不动');
 });
+
+test('文件选择导入：完整读取 JSON，清空旧值后可重复选择同一个文件', async t => {
+    const f = fixture(t);
+    const input = f.$('#sdg-style-file');
+    const file = new f.w.File([JSON.stringify({
+        _fmt: 'drawgen-style-pack', _v: 2,
+        styles: [{ name: '文件画风', value: '{Description}, watercolor' }],
+    })], 'same-style.json', { type: 'application/json' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    const choose = () => input.dispatchEvent(new f.w.Event('change', { bubbles: true }));
+    const settle = async () => {
+        for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve));
+    };
+    choose();
+    await settle();
+    assert.equal(f.style('文件画风').value, '{Description}, watercolor');
+    assert.match(f.status(), /导入完成/);
+    assert.equal(input.value, '', '选择后清空，下一次选同一文件仍会触发 change');
+    choose();
+    await settle();
+    assert.match(f.status(), /什么都没变/, '同一文件第二次也正常完成导入流程');
+});

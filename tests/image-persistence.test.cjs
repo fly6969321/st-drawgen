@@ -168,6 +168,16 @@ test('images 接口回 b64_json：不下载、直接上传存本地', async t =>
     assert.equal(f.debug.getImage(f.msg, 0), LOCAL);
 });
 
+test('站点返回格式配置为 url：images 首发请求直接发送 url', async t => {
+    const f = fixture(t, { genEndpoint: 'https://images.test/v1/images/generations', genResponseFormat: 'url' });
+    f.respond(() => f.response({ data: [{ url: SIGNED }] }));
+    assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
+    assert.equal(f.calls.length, 1, '只支持 url 的站点不必先撞一次 b64_json 400');
+    assert.equal(f.calls[0].body.response_format, 'url');
+    assert.equal(f.downloads(), 1);
+    assert.equal(f.uploads(), 1);
+});
+
 test('并发：全局已有生成时其它楼层不再付费，首个完成后解锁', async t => {
     const f = fixture(t);
     const second = { mes: 'image###second floor###', is_user: false, extra: {} };
@@ -199,6 +209,21 @@ test('失败重试开着：b64_json 被拒就改要 url 重试一次，其余请
     assert.equal(f.calls[1].body.response_format, 'url', '被拒后改要外链');
     const first = { ...f.calls[1].body }; first.response_format = 'b64_json';
     assert.deepEqual(first, f.calls[0].body, '只有 response_format 变了，其余请求不变');
+});
+
+test('配置 url 被拒且失败重试开着：对称地改要 b64_json，只重试一次', async t => {
+    const f = fixture(t, {
+        genEndpoint: 'https://images.test/v1/images/generations',
+        genResponseFormat: 'url', genRetryOnce: true,
+    });
+    f.respond(() => f.calls.length === 1
+        ? f.response({ error: { message: 'only response_format=b64_json supported' } }, 400)
+        : f.response({ data: [{ b64_json: BASE64 }] }));
+    const result = await f.finish(f.debug.genImageUnified('a cat'));
+    assert.equal(result.image, DATA);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls[0].body.response_format, 'url');
+    assert.equal(f.calls[1].body.response_format, 'b64_json');
 });
 
 test('失败重试开着：参数错误反复 400 只重试一次；无关 400 不重试', async t => {

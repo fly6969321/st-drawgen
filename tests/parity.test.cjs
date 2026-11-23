@@ -274,6 +274,10 @@ test('panel builds with quality selector and style import/export controls, quali
     assert.ok(quality, 'quality select rendered');
     const vals = Array.from(quality.options).map(o => o.value);
     assert.deepEqual(vals, ['', 'low', 'medium', 'high', 'xhigh', 'max', 'auto']);
+    const responseFormat = doc.querySelector('#sdg-gen-response-format');
+    assert.ok(responseFormat, 'response_format select rendered');
+    assert.deepEqual(Array.from(responseFormat.options).map(o => o.value), ['b64_json', 'url']);
+    assert.equal(responseFormat.value, 'b64_json', '老配置默认仍先要图片数据');
     assert.ok(doc.querySelector('#sdg-style-import'), 'style import button rendered');
     assert.ok(doc.querySelector('#sdg-style-export'), 'style export button rendered');
     assert.ok(doc.querySelector('#sdg-style-file'), 'style file input rendered');
@@ -292,6 +296,11 @@ test('panel builds with quality selector and style import/export controls, quali
     quality.value = 'high';
     quality.dispatchEvent(new w.Event('change', { bubbles: true }));
     assert.equal(debug.activeProfile('gen').quality, 'high');
+    /* 返回格式同样随站点保存，不只改当前界面 */
+    responseFormat.value = 'url';
+    responseFormat.dispatchEvent(new w.Event('change', { bubbles: true }));
+    assert.equal(debug.activeProfile('gen').responseFormat, 'url');
+    assert.equal(ctx.extensionSettings['st-drawgen'].genResponseFormat, 'url');
     /* 切站点后画质回填 */
     const gens = debug.getProfiles('gen');
     const other = gens.find(p => p.id !== debug.activeProfile('gen').id);
@@ -300,5 +309,24 @@ test('panel builds with quality selector and style import/export controls, quali
         siteSel.value = other.id;
         siteSel.dispatchEvent(new w.Event('change', { bubbles: true }));
         assert.equal(doc.querySelector('#sdg-gen-quality').value, other.quality || '');
+        assert.equal(doc.querySelector('#sdg-gen-response-format').value, other.responseFormat === 'url' ? 'url' : 'b64_json');
     }
+});
+
+test('画风导入按钮反复打开原生选择器，showPicker 不可用时回退 click', t => {
+    const { w } = fixture(t, { sdgBuiltinSeeded17: true });
+    const doc = w.document;
+    const input = doc.querySelector('#sdg-style-file');
+    const button = doc.querySelector('#sdg-style-import');
+    let shown = 0, clicked = 0;
+    input.showPicker = () => { shown++; };
+    input.click = () => { clicked++; };
+    button.click();
+    button.click();
+    assert.equal(shown, 2, '每次点导入都会主动打开文件选择器');
+    assert.equal(clicked, 0);
+    assert.match(doc.querySelector('#sdg-status').textContent, /请选择要导入的 JSON 文件/);
+    input.showPicker = undefined;
+    button.click();
+    assert.equal(clicked, 1, '老 WebView 没有 showPicker 时仍可打开');
 });
