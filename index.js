@@ -1,5 +1,5 @@
 /*
- *  生图工坊 · DrawGen v1.8.31（YeeMagine 异步任务跨域代理修复）
+ *  生图工坊 · DrawGen v1.8.32（YeeMagine 静态生图参数修复）
  *  SillyTavern 第三方扩展 —— 独立生图插件
  *
  *  管线：AI 回复 → 副AI提取生图描述（整段 / 分层）→ 注入 image###…### 标记 → 中转站生图 → 标记原位换成图片
@@ -137,12 +137,13 @@
  *  · v1.8.30 仅对 demo.yeelo.fun + gpt-image-2.6 启用文档异步参数和任务轮询；
  *    直接返图、URL / base64、失败状态、超时取消及本地存图均兼容，其它站点请求与解析路径不变。
  *  · v1.8.31 公益站提交、轮询与模型拉取支持酒馆跨域代理；统一补齐 /v1 地址。
+ *  · v1.8.32 公益站 PNG 请求不再发送仅用于 GIF 的帧数与帧时长，修复提交任务时的 400。
  */
 (function () {
     "use strict";
 
     const EXT_KEY = "st-drawgen";
-    const VERSION = "1.8.31";
+    const VERSION = "1.8.32";
     const LOG = "[DrawGen]";
 
     /* ============================================================
@@ -4098,10 +4099,8 @@
             const requestBody = function (format) {
                 const body = { model: c.genModel, prompt: finalPrompt, n: 1, size: size, quality: quality || (yeeAsync ? "auto" : undefined), response_format: format };
                 if (yeeAsync) {
-                    /* 完全按该站文档示例；这些字段绝不发给其它站点。 */
+                    /* 静态 PNG 不发送 GIF 专用的帧数与帧时长；这些字段只用于该站。 */
                     body.output_format = "png";
-                    body.frame_count = 9;
-                    body.frame_duration_ms = 200;
                     body.async = true;
                 }
                 return JSON.stringify(body);

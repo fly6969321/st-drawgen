@@ -233,10 +233,18 @@ test('配置 url 被拒且失败重试开着：对称地改要 b64_json，只重
     assert.equal(f.calls[1].body.response_format, 'b64_json');
 });
 
-test('YeeMagine：按文档提交异步任务，轮询 URL 后沿用本地下载与酒馆存图', async t => {
+function rejectNonGifFrameParameters(f, call) {
+    if (call.method !== 'POST' || call.body.output_format === 'gif') return null;
+    const field = ['frame_count', 'frame_duration_ms'].find(key => Object.hasOwn(call.body, key));
+    return field ? f.response({ error: { message: field + ' 仅适用于 GIF 输出', type: 'invalid_request_error' } }, 400) : null;
+}
+
+test('YeeMagine：PNG 异步任务不带 GIF 参数，轮询 URL 后沿用本地下载与酒馆存图', async t => {
     const f = fixture(t, { genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6' });
     let queries = 0;
     f.respond(call => {
+        const invalidFrames = rejectNonGifFrameParameters(f, call);
+        if (invalidFrames) return invalidFrames;
         if (call.method === 'POST') return f.response({ task_id: 'job_1', status: 'pending' });
         queries++;
         return f.response(queries === 1
@@ -250,8 +258,8 @@ test('YeeMagine：按文档提交异步任务，轮询 URL 后沿用本地下载
     assert.equal(post.body.response_format, 'url');
     assert.equal(post.body.quality, 'auto');
     assert.equal(post.body.output_format, 'png');
-    assert.equal(post.body.frame_count, 9);
-    assert.equal(post.body.frame_duration_ms, 200);
+    assert.equal(Object.hasOwn(post.body, 'frame_count'), false);
+    assert.equal(Object.hasOwn(post.body, 'frame_duration_ms'), false);
     assert.equal(post.body.async, true);
     assert.equal(f.calls[1].url, 'https://demo.yeelo.fun/v1/images/tasks/job_1');
     assert.equal(f.calls[1].method, 'GET');
@@ -305,12 +313,14 @@ test('YeeMagine：代理同时覆盖任务提交和轮询，根地址与完整�
         });
         let queries = 0;
         f.respond(call => {
+            const invalidFrames = rejectNonGifFrameParameters(f, call);
+            if (invalidFrames) return invalidFrames;
             if (call.method === 'POST') return f.response({ task_id: 'proxy/job', status: 'pending' });
             return f.response(++queries === 1
                 ? { task_id: 'proxy/job', status: 'processing' }
                 : { status: 'succeeded', data: [{ b64_json: BASE64 }] });
         });
-        assert.equal((await f.finish(f.debug.genImageUnified('a cat'))).image, DATA);
+        assert.equal(await f.finish(f.debug.generateForFloor(0, '', 0)), LOCAL);
         assert.deepEqual(f.calls.map(call => [call.method, call.url]), [
             ['POST', '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/images/generations')],
             ['GET', '/proxy/' + encodeURIComponent('https://demo.yeelo.fun/v1/images/tasks/proxy%2Fjob')],
@@ -326,8 +336,43 @@ test('YeeMagine：代理同时覆盖任务提交和轮询，根地址与完整�
             assert.equal(call.signal, f.calls[0].signal, '整个任务共用同一个停止信号');
         }
         assert.equal(f.calls[0].headers['Content-Type'], 'application/json');
+        assert.equal(f.calls[0].body.output_format, 'png');
+        assert.equal(Object.hasOwn(f.calls[0].body, 'frame_count'), false);
+        assert.equal(Object.hasOwn(f.calls[0].body, 'frame_duration_ms'), false);
         assert.equal(f.calls[0].body.async, true);
         assert.equal(f.downloads(), 0);
+        assert.equal(f.uploads(), 1);
+        assert.equal(f.debug.getImage(f.msg, 0), LOCAL);
+    }
+});
+
+test('YeeMagine：返回格式被拒后重试仍提交 PNG 异步任务，不附加 GIF 参数', async t => {
+    for (const genProxy of [false, true]) {
+        const f = fixture(t, {
+            genEndpoint: 'https://demo.yeelo.fun/v1', genModel: 'gpt-image-2.6',
+            genProxy, genRetryOnce: true,
+        });
+        let posts = 0;
+        f.respond(call => {
+            const invalidFrames = rejectNonGifFrameParameters(f, call);
+            if (invalidFrames) return invalidFrames;
+            if (call.method === 'POST') return ++posts === 1
+                ? f.response({ error: { message: 'only response_format=b64_json supported' } }, 400)
+                : f.response({ task_id: 'format-job', status: 'pending' });
+            return f.response({ status: 'succeeded', data: [{ b64_json: BASE64 }] });
+        });
+        assert.equal((await f.finish(f.debug.genImageUnified('a cat'))).image, DATA);
+        assert.deepEqual(f.calls.map(call => call.method), ['POST', 'POST', 'GET']);
+        assert.equal(f.calls[0].body.response_format, 'url');
+        assert.equal(f.calls[1].body.response_format, 'b64_json');
+        for (const call of f.calls.filter(call => call.method === 'POST')) {
+            assert.equal(call.body.output_format, 'png');
+            assert.equal(call.body.async, true);
+            assert.equal(Object.hasOwn(call.body, 'frame_count'), false);
+            assert.equal(Object.hasOwn(call.body, 'frame_duration_ms'), false);
+            assert.equal(call.url.startsWith('/proxy/'), genProxy);
+        }
+        assert.equal(f.calls[2].apiUrl, 'https://demo.yeelo.fun/v1/images/tasks/format-job');
     }
 });
 
